@@ -13,8 +13,10 @@ pub struct AppConfig {
     pub xui_expiry_days: i64,
     pub xui_login_path: String,
     pub xui_add_client_path: String,
+    pub xui_delete_client_path: String,
     pub xui_get_inbound_path: String,
     pub xui_list_inbounds_path: String,
+    pub sqlite_path: String,
     pub allow_user_ids: Option<HashSet<u64>>,
     pub approver_user_ids: HashSet<u64>,
 }
@@ -41,10 +43,13 @@ impl AppConfig {
         let xui_login_path = env::var("XUI_LOGIN_PATH").unwrap_or_else(|_| "/login".to_string());
         let xui_add_client_path = env::var("XUI_ADD_CLIENT_PATH")
             .unwrap_or_else(|_| "/panel/api/inbounds/addClient".to_string());
+        let xui_delete_client_path = env::var("XUI_DELETE_CLIENT_PATH")
+            .unwrap_or_else(|_| "/panel/inbound/{id}/delClient/{clientId}".to_string());
         let xui_get_inbound_path = env::var("XUI_GET_INBOUND_PATH")
             .unwrap_or_else(|_| "/panel/api/inbounds/get/{id}".to_string());
         let xui_list_inbounds_path = env::var("XUI_LIST_INBOUNDS_PATH")
             .unwrap_or_else(|_| "/panel/api/inbounds/list".to_string());
+        let sqlite_path = env::var("SQLITE_PATH").unwrap_or_else(|_| "vpn_bot.sqlite3".to_string());
 
         let allow_user_ids = parse_user_ids(optional_env("ALLOW_USER_IDS"));
         let approver_user_ids = parse_user_ids(Some(required_env("APPROVER_USER_IDS")?))
@@ -59,8 +64,10 @@ impl AppConfig {
             xui_expiry_days,
             xui_login_path,
             xui_add_client_path,
+            xui_delete_client_path,
             xui_get_inbound_path,
             xui_list_inbounds_path,
+            sqlite_path,
             allow_user_ids,
             approver_user_ids,
         })

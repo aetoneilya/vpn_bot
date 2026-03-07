@@ -4,13 +4,20 @@ Rust Telegram bot that creates VPN users in 3X-UI.
 
 ## Features
 
-- `/start` and `/help` commands
-- `/create [email]` command creates a pending request
+- Non-admin commands:
+  - `/vpn` requests VPN access (or returns existing access immediately)
+  - `/qr` sends URL + QR for existing access
+- Existing config check by Telegram username before creating a pending request
 - `/approve <id>` and `/deny <id>` commands for manual approval
+- Admin command `/subs` shows all existing subscriptions
+- Admin command `/requests` shows all pending access requests
+- Admin command `/delete <login>` deletes a subscription by login
+- Approval messages for admins include inline `Approve` / `Deny` buttons
 - After approval, bot sends connection URL and QR code to requester
 - Optional Telegram user allowlist with `ALLOW_USER_IDS`
 - Required approver allowlist with `APPROVER_USER_IDS`
 - Configurable limits (`XUI_TOTAL_GB`, `XUI_EXPIRY_DAYS`)
+- Pending requests are stored in SQLite and survive restarts
 
 ## Setup
 
@@ -29,17 +36,20 @@ cargo run
 - `XUI_PASSWORD`
 - `XUI_INBOUND_ID`
 - `APPROVER_USER_IDS`
+- `SQLITE_PATH` (optional, default: `vpn_bot.sqlite3`)
 
 ## Notes
 
-- 3X-UI API endpoints differ by version/build. If `/create` fails, inspect your panel's Network tab and adjust:
+- 3X-UI API endpoints differ by version/build. If `/vpn` or `/qr` fails, inspect your panel's Network tab and adjust:
   - `XUI_LOGIN_PATH`
   - `XUI_ADD_CLIENT_PATH`
+  - `XUI_DELETE_CLIENT_PATH`
   - `XUI_GET_INBOUND_PATH`
   - `XUI_LIST_INBOUNDS_PATH`
 - Keep your panel behind firewall/VPN and do not expose admin UI publicly.
 - Approval flow:
-  - User sends `/create [email]`
-  - Bot sends request ID to approver IDs
+  - User sends `/vpn`
+  - If config for Telegram username already exists on host: bot sends URL + QR immediately
+  - If config does not exist: bot sends request ID to approver IDs
   - Approver runs `/approve <id>` or `/deny <id>`
   - On approve, requester receives URL and QR code
