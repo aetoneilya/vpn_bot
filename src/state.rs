@@ -1,58 +1,39 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use anyhow::Result;
 use teloxide::types::ChatId;
-use tokio::sync::Mutex;
 
 use crate::config::AppConfig;
+use crate::storage::{InsertPendingResult, SqliteStore, StoredPendingRequest};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: AppConfig,
-    approvals: Arc<ApprovalsState>,
+    store: Arc<SqliteStore>,
 }
 
 impl AppState {
-    pub fn new(config: AppConfig) -> Self {
-        Self {
+    pub fn new(config: AppConfig) -> Result<Self> {
+        let store = SqliteStore::new(&config.sqlite_path)?;
+        Ok(Self {
             config,
-            approvals: Arc::new(ApprovalsState::new()),
-        }
+            store: Arc::new(store),
+        })
     }
 
-    pub async fn create_request(&self, request: PendingCreateRequest) -> u64 {
-        self.approvals.create_request(request).await
+    pub async fn create_request(
+        &self,
+        request: PendingCreateRequest,
+    ) -> Result<InsertPendingResult> {
+        self.store.insert_request(&request)
     }
 
-    pub async fn take_request(&self, request_id: u64) -> Option<PendingCreateRequest> {
-        self.approvals.take_request(request_id).await
-    }
-}
-
-struct ApprovalsState {
-    next_request_id: AtomicU64,
-    pending: Mutex<HashMap<u64, PendingCreateRequest>>,
-}
-
-impl ApprovalsState {
-    fn new() -> Self {
-        Self {
-            next_request_id: AtomicU64::new(1),
-            pending: Mutex::new(HashMap::new()),
-        }
+    pub async fn take_request(&self, request_id: u64) -> Result<Option<PendingCreateRequest>> {
+        self.store.take_request(request_id)
     }
 
-    async fn create_request(&self, request: PendingCreateRequest) -> u64 {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let mut pending = self.pending.lock().await;
-        pending.insert(request_id, request);
-        request_id
-    }
-
-    async fn take_request(&self, request_id: u64) -> Option<PendingCreateRequest> {
-        let mut pending = self.pending.lock().await;
-        pending.remove(&request_id)
+    pub async fn list_requests(&self) -> Result<Vec<StoredPendingRequest>> {
+        self.store.list_requests()
     }
 }
 
