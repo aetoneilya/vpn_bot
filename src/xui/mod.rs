@@ -2,9 +2,9 @@ mod links;
 mod models;
 
 use anyhow::{Context, Result, bail};
-use chrono::{Duration, Utc};
 use reqwest::Client;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -37,7 +37,39 @@ impl XuiClient {
     }
 
     pub async fn login(&self) -> Result<()> {
-        let url = join_url(&self.config.xui_base_url, &self.config.xui_login_path);
+        let mut paths = vec![self.config.xui_login_path.clone()];
+        for fallback in ["/login", "/panel/login", "/xui/login"] {
+            if !paths.iter().any(|p| p == fallback) {
+                paths.push(fallback.to_string());
+            }
+        }
+
+        let mut tried = HashSet::new();
+        let mut last_err: Option<anyhow::Error> = None;
+        for path in paths {
+            if !tried.insert(path.clone()) {
+                continue;
+            }
+            match self.login_with_path(&path).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let msg = err.to_string();
+                    // Only fallback on 404-style path errors; otherwise return immediately.
+                    if msg.contains("404 Not Found") || msg.contains("status 404") {
+                        log::warn!("x-ui login path {} returned 404, trying fallback", path);
+                        last_err = Some(err);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("x-ui login failed on all fallback paths")))
+    }
+
+    async fn login_with_path(&self, login_path: &str) -> Result<()> {
+        let url = join_url(&self.config.xui_base_url, login_path);
         log::info!("x-ui login request to {}", url);
 
         let form_resp = self
@@ -84,7 +116,6 @@ impl XuiClient {
             bail!("x-ui login failed: {}", body);
         }
         log::info!("x-ui login successful (json)");
-
         Ok(())
     }
 
@@ -106,11 +137,8 @@ impl XuiClient {
             email
         );
 
-        let expiry_time_ms = if self.config.xui_expiry_days <= 0 {
-            0
-        } else {
-            (Utc::now() + Duration::days(self.config.xui_expiry_days)).timestamp_millis()
-        };
+        // Access is always issued without expiration.
+        let expiry_time_ms = 0;
 
         let settings = json!({
             "clients": [
@@ -165,10 +193,14 @@ impl XuiClient {
             bail!("x-ui addClient unsuccessful: {msg}");
         }
 
-        let mut connection_url = parsed
-            .obj
-            .as_ref()
-            .and_then(|obj| find_best_connection_url(obj, &email, &client_uuid, &sub_id));
+        let mut connection_url = self.find_client_subscription_url_by_email(&email).await?;
+
+        if connection_url.is_none() {
+            connection_url = parsed
+                .obj
+                .as_ref()
+                .and_then(|obj| find_best_connection_url(obj, &email, &client_uuid, &sub_id));
+        }
 
         if connection_url.is_none() {
             log::debug!("x-ui addClient did not return URL, using server endpoint fallback");
@@ -198,6 +230,10 @@ impl XuiClient {
     }
 
     pub async fn find_client_connection_url_by_email(&self, email: &str) -> Result<Option<String>> {
+        if let Some(subscription_url) = self.find_client_subscription_url_by_email(email).await? {
+            return Ok(Some(subscription_url));
+        }
+
         let get_inbound_url = self
             .config
             .xui_get_inbound_path
@@ -215,6 +251,24 @@ impl XuiClient {
             &self.config.xui_list_inbounds_path,
         );
         Ok(self.extract_specific_client_url(&list_url, email).await)
+    }
+
+    async fn find_client_subscription_url_by_email(&self, email: &str) -> Result<Option<String>> {
+        let sub_base = match self.fetch_subscription_base_url().await? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let email_norm = normalize_login(email);
+        let subs = self.list_existing_subscriptions().await?;
+        let sub_id = subs
+            .into_iter()
+            .find(|s| normalize_login(&s.email) == email_norm)
+            .and_then(|s| s.sub_id)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        Ok(sub_id.map(|id| format!("{sub_base}{id}")))
     }
 
     pub async fn list_existing_subscriptions(&self) -> Result<Vec<ExistingSubscription>> {
@@ -259,9 +313,12 @@ impl XuiClient {
     }
 
     pub async fn delete_subscription_by_email(&self, email: &str) -> Result<bool> {
+        let needle = normalize_login(email);
         let subs = self.list_existing_subscriptions().await?;
-        let mut matched: Vec<ExistingSubscription> =
-            subs.into_iter().filter(|s| s.email == email).collect();
+        let mut matched: Vec<ExistingSubscription> = subs
+            .into_iter()
+            .filter(|s| normalize_login(&s.email) == needle)
+            .collect();
 
         if matched.is_empty() {
             return Ok(false);
@@ -271,27 +328,19 @@ impl XuiClient {
         }
         let sub = matched.remove(0);
 
-        // Try configured path first (supports /panel/inbound/{id}/delClient/{clientId}),
-        // then a common JSON fallback path for other 3X-UI builds.
-        if self
-            .try_delete_client(
-                &self.config.xui_delete_client_path,
-                sub.inbound_id,
-                &sub.email,
-                &sub.client_id,
-            )
-            .await?
-        {
-            return Ok(true);
-        }
-
-        let fallback = "/panel/api/inbounds/delClient";
-        if self.config.xui_delete_client_path != fallback
-            && self
-                .try_delete_client(fallback, sub.inbound_id, &sub.email, &sub.client_id)
+        let fallback_paths = [
+            self.config.xui_delete_client_path.as_str(),
+            "/panel/api/inbounds/{id}/delClient/{clientId}",
+            "/panel/inbound/{id}/delClient/{clientId}",
+            "/panel/api/inbounds/delClient",
+        ];
+        for path in fallback_paths {
+            if self
+                .try_delete_client(path, sub.inbound_id, &sub.email, &sub.client_id)
                 .await?
-        {
-            return Ok(true);
+            {
+                return Ok(true);
+            }
         }
 
         Ok(false)
@@ -372,6 +421,10 @@ impl XuiClient {
         let body = response.text().await.ok()?;
         let parsed = serde_json::from_str::<Value>(&body).ok()?;
 
+        if let Some(found) = find_best_connection_url(&parsed, email, "", "") {
+            return Some(found);
+        }
+
         generate_connection_url_from_server_obj(
             &parsed,
             &self.config.xui_base_url,
@@ -382,6 +435,9 @@ impl XuiClient {
         .or_else(|| {
             let wrapped = serde_json::from_str::<XuiApiResponse>(&body).ok()?;
             let obj = wrapped.obj.as_ref()?;
+            if let Some(found) = find_best_connection_url(obj, email, "", "") {
+                return Some(found);
+            }
             generate_connection_url_from_server_obj(
                 obj,
                 &self.config.xui_base_url,
@@ -402,36 +458,70 @@ impl XuiClient {
         // Route style endpoint (used by your panel):
         // /panel/inbound/{id}/delClient/{clientId}
         if delete_path.contains("{id}") || delete_path.contains("{clientId}") {
-            let encoded_client_id = urlencoding::encode(client_id);
-            let route_path = delete_path
-                .replace("{id}", &inbound_id.to_string())
-                .replace("{clientId}", &encoded_client_id);
-            let url = join_url(&self.config.xui_base_url, &route_path);
-            log::info!(
-                "x-ui delete client route request path={} inbound_id={} email={}",
-                route_path,
-                inbound_id,
-                email
-            );
+            // Different 3X-UI builds may expect {clientId} as UUID or as email.
+            let candidates = [client_id, email];
+            for candidate in candidates {
+                let encoded_client_id = urlencoding::encode(candidate);
+                let route_path = delete_path
+                    .replace("{id}", &inbound_id.to_string())
+                    .replace("{clientId}", &encoded_client_id);
+                let url = join_url(&self.config.xui_base_url, &route_path);
+                log::info!(
+                    "x-ui delete client route request path={} inbound_id={} email={} client_id_candidate={}",
+                    route_path,
+                    inbound_id,
+                    email,
+                    candidate
+                );
 
-            let response =
-                self.http.post(&url).send().await.with_context(|| {
-                    format!("x-ui delete client route request failed for {url}")
-                })?;
-
-            if response.status().is_success() {
-                let body = response
-                    .text()
+                let response = self
+                    .http
+                    .post(&url)
+                    .send()
                     .await
-                    .context("x-ui delete client route body failed")?;
-                let parsed: Result<XuiApiResponse, _> = serde_json::from_str(&body);
-                return Ok(!matches!(parsed, Ok(ref api) if api.success == Some(false)));
+                    .with_context(|| format!("x-ui delete client route request failed for {url}"))?;
+
+                if response.status().is_success() {
+                    let body = response
+                        .text()
+                        .await
+                        .context("x-ui delete client route body failed")?;
+                    let parsed: Result<XuiApiResponse, _> = serde_json::from_str(&body);
+                    if !matches!(parsed, Ok(ref api) if api.success == Some(false)) {
+                        return Ok(true);
+                    }
+                } else {
+                    log::debug!(
+                        "x-ui delete client route non-success status={} path={} method=POST",
+                        response.status(),
+                        route_path
+                    );
+                }
+
+                // Some legacy builds accept GET on route endpoint.
+                let response = self
+                    .http
+                    .get(&url)
+                    .send()
+                    .await
+                    .with_context(|| format!("x-ui delete client route GET failed for {url}"))?;
+                if response.status().is_success() {
+                    let body = response
+                        .text()
+                        .await
+                        .context("x-ui delete client route body (GET) failed")?;
+                    let parsed: Result<XuiApiResponse, _> = serde_json::from_str(&body);
+                    if !matches!(parsed, Ok(ref api) if api.success == Some(false)) {
+                        return Ok(true);
+                    }
+                } else {
+                    log::debug!(
+                        "x-ui delete client route non-success status={} path={} method=GET",
+                        response.status(),
+                        route_path
+                    );
+                }
             }
-            log::debug!(
-                "x-ui delete client route non-success status={} path={}",
-                response.status(),
-                route_path
-            );
             return Ok(false);
         }
 
@@ -490,6 +580,54 @@ impl XuiClient {
 
         Ok(false)
     }
+
+    async fn fetch_subscription_base_url(&self) -> Result<Option<String>> {
+        let url = join_url(&self.config.xui_base_url, "/panel/setting/defaultSettings");
+        let response = self
+            .http
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("x-ui defaultSettings request failed for {url}"))?;
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let body = response
+            .text()
+            .await
+            .context("x-ui defaultSettings response body failed")?;
+        let parsed: Value =
+            serde_json::from_str(&body).context("x-ui defaultSettings invalid json")?;
+
+        let sub_enable = parsed
+            .get("obj")
+            .and_then(|v| v.get("subEnable"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !sub_enable {
+            return Ok(None);
+        }
+
+        let sub_uri = parsed
+            .get("obj")
+            .and_then(|v| v.get("subURI"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let Some(sub_uri) = sub_uri else {
+            return Ok(None);
+        };
+
+        let absolute = if sub_uri.starts_with("http://") || sub_uri.starts_with("https://") {
+            sub_uri.to_string()
+        } else {
+            join_url(&self.config.xui_base_url, sub_uri)
+        };
+
+        Ok(Some(ensure_trailing_slash(&absolute)))
+    }
 }
 
 fn join_url(base: &str, path: &str) -> String {
@@ -510,4 +648,16 @@ fn looks_like_api_error(body: &str) -> Result<bool> {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn normalize_login(login: &str) -> String {
+    login.trim().trim_start_matches('@').to_lowercase()
+}
+
+fn ensure_trailing_slash(value: &str) -> String {
+    if value.ends_with('/') {
+        value.to_string()
+    } else {
+        format!("{value}/")
+    }
 }

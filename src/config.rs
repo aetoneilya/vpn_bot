@@ -10,7 +10,6 @@ pub struct AppConfig {
     pub xui_password: String,
     pub xui_inbound_id: i64,
     pub xui_total_gb: u64,
-    pub xui_expiry_days: i64,
     pub xui_login_path: String,
     pub xui_add_client_path: String,
     pub xui_delete_client_path: String,
@@ -35,16 +34,11 @@ impl AppConfig {
             .parse::<u64>()
             .context("XUI_TOTAL_GB must be an integer")?;
 
-        let xui_expiry_days = env::var("XUI_EXPIRY_DAYS")
-            .unwrap_or_else(|_| "30".to_string())
-            .parse::<i64>()
-            .context("XUI_EXPIRY_DAYS must be an integer")?;
-
         let xui_login_path = env::var("XUI_LOGIN_PATH").unwrap_or_else(|_| "/login".to_string());
         let xui_add_client_path = env::var("XUI_ADD_CLIENT_PATH")
             .unwrap_or_else(|_| "/panel/api/inbounds/addClient".to_string());
         let xui_delete_client_path = env::var("XUI_DELETE_CLIENT_PATH")
-            .unwrap_or_else(|_| "/panel/inbound/{id}/delClient/{clientId}".to_string());
+            .unwrap_or_else(|_| "/panel/api/inbounds/{id}/delClient/{clientId}".to_string());
         let xui_get_inbound_path = env::var("XUI_GET_INBOUND_PATH")
             .unwrap_or_else(|_| "/panel/api/inbounds/get/{id}".to_string());
         let xui_list_inbounds_path = env::var("XUI_LIST_INBOUNDS_PATH")
@@ -61,7 +55,6 @@ impl AppConfig {
             xui_password,
             xui_inbound_id,
             xui_total_gb,
-            xui_expiry_days,
             xui_login_path,
             xui_add_client_path,
             xui_delete_client_path,

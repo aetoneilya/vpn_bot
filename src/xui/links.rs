@@ -18,6 +18,10 @@ pub(crate) fn find_best_connection_url(
         .into_iter()
         .map(|candidate| {
             let mut score = 0;
+            if is_subscription_url_candidate(&candidate) {
+                // Prefer subscription links over one-off config links.
+                score += 10;
+            }
             if !client_uuid.is_empty() && candidate.contains(client_uuid) {
                 score += 4;
             }
@@ -70,6 +74,12 @@ fn is_connection_url_candidate(value: &str) -> bool {
         || lower.starts_with("tuic://")
         || lower.starts_with("http://")
         || lower.starts_with("https://")
+}
+
+fn is_subscription_url_candidate(value: &str) -> bool {
+    let lower = value.trim().to_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://"))
+        && (lower.contains("/sub") || lower.contains("subscription") || lower.contains("subscribe"))
 }
 
 pub(crate) fn generate_connection_url_from_server_obj(
@@ -301,6 +311,11 @@ pub(crate) fn collect_inbound_subscriptions(value: &Value, out: &mut Vec<Existin
             .and_then(Value::as_str)
             .map(ToString::to_string)
             .filter(|s| !s.trim().is_empty());
+        let sub_id = client
+            .get("subId")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .filter(|s| !s.trim().is_empty());
         let enabled = client
             .get("enable")
             .and_then(Value::as_bool)
@@ -313,6 +328,7 @@ pub(crate) fn collect_inbound_subscriptions(value: &Value, out: &mut Vec<Existin
         out.push(ExistingSubscription {
             client_id,
             email,
+            sub_id,
             tg_id,
             enabled,
             expiry_time,
