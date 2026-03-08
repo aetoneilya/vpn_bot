@@ -1,3 +1,6 @@
 /target
 .env
 vpn_bot.sqlite3
+vpn_bot.sqlite3-shm
+vpn_bot.sqlite3-wal
+.idea/

@@ -18,6 +18,7 @@ pub struct CreatedClientResult {
 pub struct ExistingSubscription {
     pub client_id: String,
     pub email: String,
+    pub sub_id: Option<String>,
     pub tg_id: Option<String>,
     pub enabled: bool,
     pub expiry_time: i64,

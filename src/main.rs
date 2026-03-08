@@ -46,10 +46,12 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_message(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
-    if let Some(text) = msg.text().map(str::to_owned)
-        && let Err(err) = handlers::handle_text(bot, msg, &text, state).await
-    {
-        log::error!("handler error: {err:#}");
+    if let Some(text) = msg.text().map(str::to_owned) {
+        if let Err(err) = handlers::handle_text(bot, msg, &text, state).await {
+            log::error!("handler error: {err:#}");
+        }
+    } else if let Err(err) = handlers::handle_non_text(bot, msg, state).await {
+        log::error!("non-text handler error: {err:#}");
     }
     Ok(())
 }

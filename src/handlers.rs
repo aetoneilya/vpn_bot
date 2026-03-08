@@ -43,11 +43,51 @@ pub async fn handle_text(bot: Bot, msg: Message, text: &str, state: Arc<AppState
         Some("/subs") => handle_subs(bot, msg, state).await?,
         Some("/requests") => handle_requests(bot, msg, state).await?,
         Some("/delete") => handle_delete(bot, msg, arg1, state).await?,
+        Some("/broadcast") => handle_broadcast(bot, msg, command_tail(text), state).await?,
+        Some("/msg") => handle_direct_message(bot, msg, command_tail(text), state).await?,
         Some("/approve") => handle_approve_command(bot, msg, arg1, state).await?,
         Some("/deny") => handle_deny_command(bot, msg, arg1, state).await?,
         _ => {}
     }
 
+    Ok(())
+}
+
+pub async fn handle_non_text(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
+    let actor_id = message_user_id(&msg)?;
+    if state.config.approver_user_ids.contains(&actor_id) {
+        return Ok(());
+    }
+
+    if !is_allowed(actor_id, &state.config.allow_user_ids) {
+        log::warn!("access denied for user_id={} on non-text message", actor_id);
+        bot.send_message(msg.chat.id, "Access denied.").await?;
+        return Ok(());
+    }
+
+    if !is_meme_message(&msg) {
+        bot.send_message(msg.chat.id, USER_COMMANDS_HINT).await?;
+        return Ok(());
+    }
+
+    let from = message_user(&msg)?;
+    let login = from
+        .username
+        .as_deref()
+        .map(format_login)
+        .unwrap_or_else(|| "<no username>".to_string());
+    let meta = format!(
+        "Мем от {login} (id: {})\nchat_id: {}",
+        from.id.0, msg.chat.id.0
+    );
+
+    for approver_id in &state.config.approver_user_ids {
+        let admin_chat = ChatId(*approver_id as i64);
+        bot.send_message(admin_chat, meta.clone()).await?;
+        bot.copy_message(admin_chat, msg.chat.id, msg.id).await?;
+    }
+
+    bot.send_message(msg.chat.id, "Мем отправлен админу.").await?;
     Ok(())
 }
 
@@ -119,7 +159,7 @@ pub async fn handle_callback(
 
 async fn send_help(bot: &Bot, chat_id: ChatId, is_admin: bool) -> Result<()> {
     let text = if is_admin {
-        "Commands:\n/vpn - Получить доступ к VPN\n/qr - Получить QR для существующего доступа\n/subs - Показать все подписки\n/requests - Показать все pending-запросы\n/delete <login> - Удалить подписку по логину\n/approve <id> - Approve pending request\n/deny <id> - Deny pending request"
+        "Commands:\n/vpn - Получить доступ к VPN\n/qr - Получить QR для существующего доступа\n/subs - Показать все подписки\n/requests - Показать все pending-запросы\n/delete <login> - Удалить подписку по логину\n/broadcast <text> - Рассылка всем пользователям\n/msg <@login|tg_id> <text> - Сообщение конкретному пользователю\n/approve <id> - Approve pending request\n/deny <id> - Deny pending request"
     } else {
         "Commands:\n/vpn - Получить доступ к VPN\n/qr - Получить QR для существующего доступа"
     };
@@ -181,7 +221,7 @@ async fn handle_vpn_access(bot: Bot, msg: Message, state: Arc<AppState>) -> Resu
             let approver_text = format!(
                 "New VPN request #{request_id}\nFrom user: `{}`\nLogin: `{}`",
                 request.requester_user_id,
-                request.custom_email.as_deref().unwrap_or("<none>")
+                format_login(request.custom_email.as_deref().unwrap_or("<none>"))
             );
 
             for approver_id in &state.config.approver_user_ids {
@@ -271,7 +311,7 @@ async fn handle_subs(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()>
         };
         lines.push(format!(
             "• {} | tg:{} | enabled:{} | exp:{} | inbound:{} ({})",
-            s.email,
+            format_login(&s.email),
             s.tg_id.unwrap_or_else(|| "-".to_string()),
             s.enabled,
             expiry,
@@ -308,7 +348,7 @@ async fn handle_requests(bot: Bot, msg: Message, state: Arc<AppState>) -> Result
             item.id,
             item.request.requester_user_id,
             item.request.requester_chat_id.0,
-            item.request.custom_email.unwrap_or_else(|| "-".to_string()),
+            format_login(&item.request.custom_email.unwrap_or_else(|| "-".to_string())),
             created
         );
 
@@ -328,7 +368,7 @@ async fn handle_delete(
 ) -> Result<()> {
     ensure_approver(&bot, &msg, &state).await?;
     let login = arg1.ok_or_else(|| anyhow!("missing login for /delete"))?;
-    let login = login.trim();
+    let login = login.trim().trim_start_matches('@');
     if login.is_empty() {
         return Err(anyhow!("empty login for /delete"));
     }
@@ -345,6 +385,111 @@ async fn handle_delete(
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn handle_broadcast(
+    bot: Bot,
+    msg: Message,
+    text: Option<&str>,
+    state: Arc<AppState>,
+) -> Result<()> {
+    ensure_approver(&bot, &msg, &state).await?;
+    let text = text
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("missing text for /broadcast"))?;
+
+    let client = logged_in_xui(&state).await?;
+    let subs = client.list_existing_subscriptions().await?;
+    let mut recipients = std::collections::BTreeSet::<i64>::new();
+    for s in subs {
+        if let Some(tg_id) = s.tg_id
+            && let Ok(parsed) = tg_id.parse::<i64>()
+            && parsed > 0
+        {
+            recipients.insert(parsed);
+        }
+    }
+
+    if recipients.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "Не найдено получателей для рассылки (tgId пустой).",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let mut sent = 0usize;
+    let mut failed = 0usize;
+    for chat_id in recipients {
+        match bot.send_message(ChatId(chat_id), text.to_string()).await {
+            Ok(_) => sent += 1,
+            Err(err) => {
+                failed += 1;
+                log::warn!("broadcast failed chat_id={} error={}", chat_id, err);
+            }
+        }
+    }
+
+    bot.send_message(
+        msg.chat.id,
+        format!("Рассылка завершена. Успешно: {sent}, ошибок: {failed}."),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn handle_direct_message(
+    bot: Bot,
+    msg: Message,
+    payload: Option<&str>,
+    state: Arc<AppState>,
+) -> Result<()> {
+    ensure_approver(&bot, &msg, &state).await?;
+    let payload = payload
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("usage: /msg <@login|tg_id> <text>"))?;
+
+    let (target_raw, text) = split_target_and_text(payload)
+        .ok_or_else(|| anyhow!("usage: /msg <@login|tg_id> <text>"))?;
+
+    let chat_id = if let Ok(id) = target_raw.parse::<i64>() {
+        if id <= 0 {
+            return Err(anyhow!("tg_id must be positive"));
+        }
+        id
+    } else {
+        let target_login = target_raw.trim().trim_start_matches('@').to_lowercase();
+        if target_login.is_empty() {
+            return Err(anyhow!("empty login in /msg"));
+        }
+
+        let client = logged_in_xui(&state).await?;
+        let subs = client.list_existing_subscriptions().await?;
+        let tg_id = subs
+            .into_iter()
+            .find(|s| s.email.trim().eq_ignore_ascii_case(&target_login))
+            .and_then(|s| s.tg_id)
+            .ok_or_else(|| anyhow!("user not found or tgId is empty"))?;
+        let parsed = tg_id
+            .trim()
+            .parse::<i64>()
+            .context("invalid tgId format in subscription")?;
+        if parsed <= 0 {
+            return Err(anyhow!("invalid tgId value in subscription"));
+        }
+        parsed
+    };
+
+    bot.send_message(ChatId(chat_id), text.to_string()).await?;
+    bot.send_message(
+        msg.chat.id,
+        format!("Сообщение отправлено пользователю `{}`.", chat_id),
+    )
+    .await?;
     Ok(())
 }
 
@@ -573,6 +718,21 @@ fn first_arg(text: &str) -> Option<&str> {
     parts.next().map(str::trim).filter(|v| !v.is_empty())
 }
 
+fn command_tail(text: &str) -> Option<&str> {
+    let first_space = text.find(char::is_whitespace)?;
+    Some(text[first_space..].trim())
+}
+
+fn split_target_and_text(payload: &str) -> Option<(&str, &str)> {
+    let mut parts = payload.splitn(2, char::is_whitespace);
+    let target = parts.next()?.trim();
+    let text = parts.next()?.trim();
+    if target.is_empty() || text.is_empty() {
+        return None;
+    }
+    Some((target, text))
+}
+
 fn message_user_id(msg: &Message) -> Result<u64> {
     Ok(message_user(msg)?.id.0)
 }
@@ -588,4 +748,23 @@ fn parse_request_id(request_id: Option<&str>) -> Result<u64> {
     request_id
         .parse::<u64>()
         .context("request id must be an integer")
+}
+
+fn format_login(login: &str) -> String {
+    let trimmed = login.trim();
+    if trimmed.is_empty() || trimmed == "-" || trimmed == "<none>" {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with('@') {
+        trimmed.to_string()
+    } else {
+        format!("@{trimmed}")
+    }
+}
+
+fn is_meme_message(msg: &Message) -> bool {
+    msg.sticker().is_some()
+        || msg.photo().is_some()
+        || msg.animation().is_some()
+        || msg.video().is_some()
 }

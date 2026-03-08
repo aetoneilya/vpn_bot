@@ -12,11 +12,13 @@ Rust Telegram bot that creates VPN users in 3X-UI.
 - Admin command `/subs` shows all existing subscriptions
 - Admin command `/requests` shows all pending access requests
 - Admin command `/delete <login>` deletes a subscription by login
+- Admin command `/broadcast <text>` sends a message to all users with non-empty `tgId`
+- Admin command `/msg <@login|tg_id> <text>` sends a message to one user
 - Approval messages for admins include inline `Approve` / `Deny` buttons
 - After approval, bot sends connection URL and QR code to requester
 - Optional Telegram user allowlist with `ALLOW_USER_IDS`
 - Required approver allowlist with `APPROVER_USER_IDS`
-- Configurable limits (`XUI_TOTAL_GB`, `XUI_EXPIRY_DAYS`)
+- Configurable limits (`XUI_TOTAL_GB`)
 - Pending requests are stored in SQLite and survive restarts
 
 ## Setup
@@ -46,6 +48,8 @@ cargo run
   - `XUI_DELETE_CLIENT_PATH`
   - `XUI_GET_INBOUND_PATH`
   - `XUI_LIST_INBOUNDS_PATH`
+- For 3X-UI `2.8.x` builds, delete endpoint is usually: `/panel/api/inbounds/{id}/delClient/{clientId}`.
+- If panel URL contains a secret prefix (example: `https://host:2053/<secret>/panel/inbounds`), set `XUI_BASE_URL` to `https://host:2053/<secret>` (without `/panel`).
 - Keep your panel behind firewall/VPN and do not expose admin UI publicly.
 - Approval flow:
   - User sends `/vpn`
@@ -53,3 +57,25 @@ cargo run
   - If config does not exist: bot sends request ID to approver IDs
   - Approver runs `/approve <id>` or `/deny <id>`
   - On approve, requester receives URL and QR code
+
+## Deploy Script
+
+For systemd deployment on a Linux server, use:
+
+```bash
+./scripts/deploy.sh
+```
+
+Useful options:
+
+```bash
+./scripts/deploy.sh --service-name vpn-bot --install-dir /opt/vpn-bot --env-file .env
+./scripts/deploy.sh --no-build
+```
+
+After deploy:
+
+```bash
+systemctl status vpn-bot
+journalctl -u vpn-bot -f
+```
