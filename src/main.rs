@@ -47,18 +47,29 @@ async fn main() -> Result<()> {
 
 async fn handle_message(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
     if let Some(text) = msg.text().map(str::to_owned) {
-        if let Err(err) = handlers::handle_text(bot, msg, &text, state).await {
-            log::error!("handler error: {err:#}");
-        }
-    } else if let Err(err) = handlers::handle_non_text(bot, msg, state).await {
-        log::error!("non-text handler error: {err:#}");
+        log_handler_error(
+            "handler",
+            handlers::handle_text(bot, msg, &text, state).await,
+        );
+    } else {
+        log_handler_error(
+            "non-text handler",
+            handlers::handle_non_text(bot, msg, state).await,
+        );
     }
     Ok(())
 }
 
 async fn handle_callback(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -> Result<()> {
-    if let Err(err) = handlers::handle_callback(bot, q, state).await {
-        log::error!("callback handler error: {err:#}");
-    }
+    log_handler_error(
+        "callback handler",
+        handlers::handle_callback(bot, q, state).await,
+    );
     Ok(())
+}
+
+fn log_handler_error(scope: &str, result: Result<()>) {
+    if let Err(err) = result {
+        log::error!("{scope} error: {err:#}");
+    }
 }

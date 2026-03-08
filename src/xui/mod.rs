@@ -86,9 +86,19 @@ impl XuiClient {
         let status = form_resp.status();
         let body = form_resp.text().await.context("x-ui login body failed")?;
 
-        if status.is_success() && !looks_like_api_error(&body)? {
-            log::info!("x-ui login successful (form)");
-            return Ok(());
+        if status.is_success()
+            && let Ok(api) = serde_json::from_str::<XuiApiResponse>(&body)
+        {
+            if api.success == Some(true) {
+                log::info!("x-ui login successful (form)");
+                return Ok(());
+            }
+            if api.success == Some(false) {
+                bail!(
+                    "x-ui login failed: {}",
+                    api.msg.unwrap_or_else(|| "unknown x-ui error".to_string())
+                );
+            }
         }
 
         let json_resp = self
@@ -234,11 +244,7 @@ impl XuiClient {
             return Ok(Some(subscription_url));
         }
 
-        let get_inbound_url = self
-            .config
-            .xui_get_inbound_path
-            .replace("{id}", &self.config.xui_inbound_id.to_string());
-        let get_inbound_url = join_url(&self.config.xui_base_url, &get_inbound_url);
+        let get_inbound_url = self.get_inbound_url();
         if let Some(url) = self
             .extract_specific_client_url(&get_inbound_url, email)
             .await
@@ -246,10 +252,7 @@ impl XuiClient {
             return Ok(Some(url));
         }
 
-        let list_url = join_url(
-            &self.config.xui_base_url,
-            &self.config.xui_list_inbounds_path,
-        );
+        let list_url = self.list_inbounds_url();
         Ok(self.extract_specific_client_url(&list_url, email).await)
     }
 
@@ -272,10 +275,7 @@ impl XuiClient {
     }
 
     pub async fn list_existing_subscriptions(&self) -> Result<Vec<ExistingSubscription>> {
-        let list_url = join_url(
-            &self.config.xui_base_url,
-            &self.config.xui_list_inbounds_path,
-        );
+        let list_url = self.list_inbounds_url();
         log::debug!("requesting subscriptions from {}", list_url);
 
         let response = self
@@ -352,11 +352,7 @@ impl XuiClient {
         client_uuid: &str,
         sub_id: &str,
     ) -> Option<String> {
-        let get_inbound_url = self
-            .config
-            .xui_get_inbound_path
-            .replace("{id}", &self.config.xui_inbound_id.to_string());
-        let get_inbound_url = join_url(&self.config.xui_base_url, &get_inbound_url);
+        let get_inbound_url = self.get_inbound_url();
         log::debug!("fetching connection URL from {}", get_inbound_url);
         if let Some(url) = self
             .extract_url_from_endpoint(&get_inbound_url, email, client_uuid, sub_id)
@@ -365,10 +361,7 @@ impl XuiClient {
             return Some(url);
         }
 
-        let list_url = join_url(
-            &self.config.xui_base_url,
-            &self.config.xui_list_inbounds_path,
-        );
+        let list_url = self.list_inbounds_url();
         log::debug!("fetching connection URL from {}", list_url);
         self.extract_url_from_endpoint(&list_url, email, client_uuid, sub_id)
             .await
@@ -474,12 +467,9 @@ impl XuiClient {
                     candidate
                 );
 
-                let response = self
-                    .http
-                    .post(&url)
-                    .send()
-                    .await
-                    .with_context(|| format!("x-ui delete client route request failed for {url}"))?;
+                let response = self.http.post(&url).send().await.with_context(|| {
+                    format!("x-ui delete client route request failed for {url}")
+                })?;
 
                 if response.status().is_success() {
                     let body = response
@@ -499,12 +489,10 @@ impl XuiClient {
                 }
 
                 // Some legacy builds accept GET on route endpoint.
-                let response = self
-                    .http
-                    .get(&url)
-                    .send()
-                    .await
-                    .with_context(|| format!("x-ui delete client route GET failed for {url}"))?;
+                let response =
+                    self.http.get(&url).send().await.with_context(|| {
+                        format!("x-ui delete client route GET failed for {url}")
+                    })?;
                 if response.status().is_success() {
                     let body = response
                         .text()
@@ -627,6 +615,21 @@ impl XuiClient {
         };
 
         Ok(Some(ensure_trailing_slash(&absolute)))
+    }
+
+    fn list_inbounds_url(&self) -> String {
+        join_url(
+            &self.config.xui_base_url,
+            &self.config.xui_list_inbounds_path,
+        )
+    }
+
+    fn get_inbound_url(&self) -> String {
+        let path = self
+            .config
+            .xui_get_inbound_path
+            .replace("{id}", &self.config.xui_inbound_id.to_string());
+        join_url(&self.config.xui_base_url, &path)
     }
 }
 
