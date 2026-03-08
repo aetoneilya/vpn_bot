@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 
 use super::models::ExistingSubscription;
@@ -8,34 +10,15 @@ pub(crate) fn find_best_connection_url(
     client_uuid: &str,
     sub_id: &str,
 ) -> Option<String> {
-    let mut matches = Vec::new();
-    collect_connection_urls(value, &mut matches);
-    if matches.is_empty() {
+    let mut raw = Vec::new();
+    collect_connection_urls(value, &mut raw);
+    let candidates = dedup_preserve_order(raw);
+    if candidates.is_empty() {
         return None;
     }
 
-    let mut scored: Vec<(i32, String)> = matches
-        .into_iter()
-        .map(|candidate| {
-            let mut score = 0;
-            if is_subscription_url_candidate(&candidate) {
-                // Prefer subscription links over one-off config links.
-                score += 10;
-            }
-            if !client_uuid.is_empty() && candidate.contains(client_uuid) {
-                score += 4;
-            }
-            if !email.is_empty() && candidate.contains(email) {
-                score += 2;
-            }
-            if !sub_id.is_empty() && candidate.contains(sub_id) {
-                score += 1;
-            }
-            (score, candidate)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().next().map(|(_, url)| url)
+    let preferred = choose_url_with_priority(&candidates, email, client_uuid, sub_id);
+    preferred.or_else(|| candidates.first().cloned())
 }
 
 fn collect_connection_urls(value: &Value, out: &mut Vec<String>) {
@@ -80,6 +63,70 @@ fn is_subscription_url_candidate(value: &str) -> bool {
     let lower = value.trim().to_lowercase();
     (lower.starts_with("http://") || lower.starts_with("https://"))
         && (lower.contains("/sub") || lower.contains("subscription") || lower.contains("subscribe"))
+}
+
+fn is_config_url_candidate(value: &str) -> bool {
+    let lower = value.trim().to_lowercase();
+    lower.starts_with("vless://")
+        || lower.starts_with("vmess://")
+        || lower.starts_with("trojan://")
+        || lower.starts_with("ss://")
+        || lower.starts_with("hysteria://")
+        || lower.starts_with("tuic://")
+}
+
+fn choose_url_with_priority(
+    candidates: &[String],
+    email: &str,
+    client_uuid: &str,
+    sub_id: &str,
+) -> Option<String> {
+    // 1) If any URL references this exact client identity, prefer those first.
+    let identity_matched: Vec<&String> = candidates
+        .iter()
+        .filter(|url| candidate_matches_identity(url, email, client_uuid, sub_id))
+        .collect();
+
+    // 2) Inside the selected set, prefer subscription URL, then config URL.
+    pick_by_kind(&identity_matched).or_else(|| {
+        // 3) If no identity match found, still prefer subscription URL globally.
+        let all: Vec<&String> = candidates.iter().collect();
+        pick_by_kind(&all)
+    })
+}
+
+fn pick_by_kind(urls: &[&String]) -> Option<String> {
+    urls.iter()
+        .find(|u| is_subscription_url_candidate(u))
+        .map(|u| (*u).clone())
+        .or_else(|| {
+            urls.iter()
+                .find(|u| is_config_url_candidate(u))
+                .map(|u| (*u).clone())
+        })
+}
+
+fn candidate_matches_identity(url: &str, email: &str, client_uuid: &str, sub_id: &str) -> bool {
+    let has_any_identity = !email.is_empty() || !client_uuid.is_empty() || !sub_id.is_empty();
+    if !has_any_identity {
+        return false;
+    }
+    (!client_uuid.is_empty() && url.contains(client_uuid))
+        || (!email.is_empty() && url.contains(email))
+        || (!sub_id.is_empty() && url.contains(sub_id))
+}
+
+fn dedup_preserve_order(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut out = Vec::new();
+    for value in values {
+        let key = value.trim().to_string();
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        out.push(value);
+    }
+    out
 }
 
 pub(crate) fn generate_connection_url_from_server_obj(
@@ -306,16 +353,8 @@ pub(crate) fn collect_inbound_subscriptions(value: &Value, out: &mut Vec<Existin
         if email.is_empty() || client_id.is_empty() {
             continue;
         }
-        let tg_id = client
-            .get("tgId")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .filter(|s| !s.trim().is_empty());
-        let sub_id = client
-            .get("subId")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .filter(|s| !s.trim().is_empty());
+        let tg_id = client.get("tgId").and_then(json_value_as_non_empty_string);
+        let sub_id = client.get("subId").and_then(json_value_as_non_empty_string);
         let enabled = client
             .get("enable")
             .and_then(Value::as_bool)
@@ -335,5 +374,20 @@ pub(crate) fn collect_inbound_subscriptions(value: &Value, out: &mut Vec<Existin
             inbound_remark: inbound_remark.clone(),
             inbound_id,
         });
+    }
+}
+
+fn json_value_as_non_empty_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }

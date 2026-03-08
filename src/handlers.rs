@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, User};
+use teloxide::types::{
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, User,
+};
 
 use crate::config::is_allowed;
 use crate::qr::render_qr_png;
@@ -11,43 +14,86 @@ use crate::state::{AppState, PendingCreateRequest};
 use crate::storage::InsertPendingResult;
 use crate::xui::XuiClient;
 
-const USER_COMMANDS_HINT: &str = "Доступные команды: /vpn и /qr";
+const USER_COMMANDS_HINT: &str = "Доступные команды: /vpn и /meme";
 const NO_USERNAME_HINT: &str =
     "У тебя не установлен Telegram username. Установи @username и попробуй снова.";
+const ACCESS_DENIED: &str = "Access denied.";
+const REQUEST_CREATED_TEXT: &str =
+    "Сейчас @aetoneilya решит давать ли вам доступ к впн. Ответ придет в течении 3 рабочих дней";
+const PENDING_ALREADY_EXISTS_TEXT: &str =
+    "У вас уже есть активный запрос на доступ к VPN. Пожалуйста, дождитесь решения администратора.";
+const MEME_PROMPT_TEXT: &str = "Отправь мем следующим сообщением (стикер/фото/gif/видео). Возможно это ускорит рассмотрение заявки или я просто похихикаю";
+const ADMIN_HELP: &str = "Commands:\n/vpn - Получить доступ к VPN\n/subs - Показать все подписки\n/requests - Показать все pending-запросы\n/delete <login> - Удалить подписку по логину\n/broadcast <text> - Рассылка всем пользователям\n/msg <@login|tg_id> <text> - Сообщение конкретному пользователю\n/approve <id> - Approve pending request\n/deny <id> - Deny pending request";
+const USER_HELP: &str = "Commands:\n/vpn - Получить доступ к VPN\n/meme - Отправить мем админу (может ускорить рассмотрение заявки)";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestAction {
     Approve,
     Deny,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextCommand {
+    Start,
+    Help,
+    Vpn,
+    Meme,
+    Subs,
+    Requests,
+    Delete,
+    Broadcast,
+    Msg,
+    Approve,
+    Deny,
+    Unknown,
+}
+
+impl TextCommand {
+    fn parse(input: &str) -> Self {
+        match normalize_command(input).as_deref() {
+            Some("/start") => Self::Start,
+            Some("/help") => Self::Help,
+            Some("/vpn") => Self::Vpn,
+            Some("/meme") => Self::Meme,
+            Some("/subs") => Self::Subs,
+            Some("/requests") => Self::Requests,
+            Some("/delete") => Self::Delete,
+            Some("/broadcast") => Self::Broadcast,
+            Some("/msg") => Self::Msg,
+            Some("/approve") => Self::Approve,
+            Some("/deny") => Self::Deny,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn is_allowed_for_user(self) -> bool {
+        matches!(self, Self::Start | Self::Help | Self::Vpn | Self::Meme)
+    }
+}
+
 pub async fn handle_text(bot: Bot, msg: Message, text: &str, state: Arc<AppState>) -> Result<()> {
-    let command = normalize_command(text);
-    let arg1 = first_arg(text);
     let actor_id = message_user_id(&msg)?;
     let is_admin = state.config.approver_user_ids.contains(&actor_id);
+    let command = TextCommand::parse(text);
 
-    if !is_admin
-        && !matches!(
-            command.as_deref(),
-            Some("/vpn") | Some("/qr") | Some("/start") | Some("/help")
-        )
-    {
+    if !is_admin && !command.is_allowed_for_user() {
         bot.send_message(msg.chat.id, USER_COMMANDS_HINT).await?;
         return Ok(());
     }
 
-    match command.as_deref() {
-        Some("/start") | Some("/help") => send_help(&bot, msg.chat.id, is_admin).await?,
-        Some("/vpn") => handle_vpn_access(bot, msg, state).await?,
-        Some("/qr") => handle_qr(bot, msg, state).await?,
-        Some("/subs") => handle_subs(bot, msg, state).await?,
-        Some("/requests") => handle_requests(bot, msg, state).await?,
-        Some("/delete") => handle_delete(bot, msg, arg1, state).await?,
-        Some("/broadcast") => handle_broadcast(bot, msg, command_tail(text), state).await?,
-        Some("/msg") => handle_direct_message(bot, msg, command_tail(text), state).await?,
-        Some("/approve") => handle_approve_command(bot, msg, arg1, state).await?,
-        Some("/deny") => handle_deny_command(bot, msg, arg1, state).await?,
-        _ => {}
+    let arg1 = first_arg(text);
+    match command {
+        TextCommand::Start | TextCommand::Help => send_help(&bot, msg.chat.id, is_admin).await?,
+        TextCommand::Vpn => handle_vpn_access(bot, msg, state).await?,
+        TextCommand::Meme => handle_meme_command(bot, msg, state).await?,
+        TextCommand::Subs => handle_subs(bot, msg, state).await?,
+        TextCommand::Requests => handle_requests(bot, msg, state).await?,
+        TextCommand::Delete => handle_delete(bot, msg, arg1, state).await?,
+        TextCommand::Broadcast => handle_broadcast(bot, msg, command_tail(text), state).await?,
+        TextCommand::Msg => handle_direct_message(bot, msg, command_tail(text), state).await?,
+        TextCommand::Approve => handle_approve_command(bot, msg, arg1, state).await?,
+        TextCommand::Deny => handle_deny_command(bot, msg, arg1, state).await?,
+        TextCommand::Unknown => {}
     }
 
     Ok(())
@@ -61,12 +107,21 @@ pub async fn handle_non_text(bot: Bot, msg: Message, state: Arc<AppState>) -> Re
 
     if !is_allowed(actor_id, &state.config.allow_user_ids) {
         log::warn!("access denied for user_id={} on non-text message", actor_id);
-        bot.send_message(msg.chat.id, "Access denied.").await?;
+        bot.send_message(msg.chat.id, ACCESS_DENIED).await?;
         return Ok(());
     }
 
     if !is_meme_message(&msg) {
         bot.send_message(msg.chat.id, USER_COMMANDS_HINT).await?;
+        return Ok(());
+    }
+
+    if !state.consume_meme_mode(actor_id)? {
+        bot.send_message(
+            msg.chat.id,
+            "Чтобы отправить мем админу, сначала вызови /meme.",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -83,11 +138,14 @@ pub async fn handle_non_text(bot: Bot, msg: Message, state: Arc<AppState>) -> Re
 
     for approver_id in &state.config.approver_user_ids {
         let admin_chat = ChatId(*approver_id as i64);
-        bot.send_message(admin_chat, meta.clone()).await?;
+        bot.send_message(admin_chat, meta.clone())
+            .reply_markup(meme_feedback_keyboard(msg.chat.id))
+            .await?;
         bot.copy_message(admin_chat, msg.chat.id, msg.id).await?;
     }
 
-    bot.send_message(msg.chat.id, "Мем отправлен админу.").await?;
+    bot.send_message(msg.chat.id, "Мем будет обхихикан админом.😂👌")
+        .await?;
     Ok(())
 }
 
@@ -110,6 +168,31 @@ pub async fn handle_callback(
             .await?;
         return Ok(());
     };
+
+    if let Some(chat_id_raw) = data.strip_prefix("meme_like:") {
+        let chat_id = parse_chat_id(chat_id_raw)?;
+        bot.send_message(ChatId(chat_id), "ваш мем прикольный и смешной 👍(лайк)")
+            .await?;
+        clear_callback_buttons(&bot, &callback).await?;
+        bot.answer_callback_query(callback.id)
+            .text("Оценка отправлена")
+            .await?;
+        return Ok(());
+    }
+
+    if let Some(chat_id_raw) = data.strip_prefix("meme_dislike:") {
+        let chat_id = parse_chat_id(chat_id_raw)?;
+        bot.send_message(
+            ChatId(chat_id),
+            "сожалеем, уровень прикола вашего мема неудовлетворительный📉🫤",
+        )
+        .await?;
+        clear_callback_buttons(&bot, &callback).await?;
+        bot.answer_callback_query(callback.id)
+            .text("Оценка отправлена")
+            .await?;
+        return Ok(());
+    }
 
     let Some((action_raw, id_raw)) = data.split_once(':') else {
         bot.answer_callback_query(callback.id)
@@ -158,11 +241,7 @@ pub async fn handle_callback(
 }
 
 async fn send_help(bot: &Bot, chat_id: ChatId, is_admin: bool) -> Result<()> {
-    let text = if is_admin {
-        "Commands:\n/vpn - Получить доступ к VPN\n/qr - Получить QR для существующего доступа\n/subs - Показать все подписки\n/requests - Показать все pending-запросы\n/delete <login> - Удалить подписку по логину\n/broadcast <text> - Рассылка всем пользователям\n/msg <@login|tg_id> <text> - Сообщение конкретному пользователю\n/approve <id> - Approve pending request\n/deny <id> - Deny pending request"
-    } else {
-        "Commands:\n/vpn - Получить доступ к VPN\n/qr - Получить QR для существующего доступа"
-    };
+    let text = if is_admin { ADMIN_HELP } else { USER_HELP };
     bot.send_message(chat_id, text).await?;
     Ok(())
 }
@@ -203,7 +282,7 @@ async fn handle_vpn_access(bot: Bot, msg: Message, state: Arc<AppState>) -> Resu
         custom_email: Some(email.clone()),
     };
 
-    match state.create_request(request.clone()).await? {
+    match state.create_request(request.clone())? {
         InsertPendingResult::Created(request_id) => {
             log::info!(
                 "pending request created id={} requester_user_id={} email={}",
@@ -212,11 +291,7 @@ async fn handle_vpn_access(bot: Bot, msg: Message, state: Arc<AppState>) -> Resu
                 email
             );
 
-            bot.send_message(
-                msg.chat.id,
-                "Сейчас @aetoneilya решит давать ли вам доступ к впн. Ответ придет в течении 3 рабочих дней",
-            )
-            .await?;
+            bot.send_message(msg.chat.id, REQUEST_CREATED_TEXT).await?;
 
             let approver_text = format!(
                 "New VPN request #{request_id}\nFrom user: `{}`\nLogin: `{}`",
@@ -241,47 +316,23 @@ async fn handle_vpn_access(bot: Bot, msg: Message, state: Arc<AppState>) -> Resu
                 existing_id,
                 tg_user_id
             );
-            bot.send_message(
-                msg.chat.id,
-                "У вас уже есть активный запрос на доступ к VPN. Пожалуйста, дождитесь решения администратора.",
-            )
-            .await?;
+            bot.send_message(msg.chat.id, PENDING_ALREADY_EXISTS_TEXT)
+                .await?;
         }
     }
 
     Ok(())
 }
 
-async fn handle_qr(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
-    let Some((tg_user_id, username)) = resolve_user_login(&bot, &msg, &state, "/qr").await? else {
+async fn handle_meme_command(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
+    let actor_id = message_user_id(&msg)?;
+    if !is_allowed(actor_id, &state.config.allow_user_ids) {
+        bot.send_message(msg.chat.id, ACCESS_DENIED).await?;
         return Ok(());
-    };
-
-    let client = logged_in_xui(&state).await?;
-
-    if let Some(url) = client
-        .find_client_connection_url_by_email(&username)
-        .await?
-    {
-        log::info!(
-            "qr requested for existing config user_id={} email={}",
-            tg_user_id,
-            username
-        );
-        send_url_and_qr(&bot, msg.chat.id, &url, "Твоя текущая VPN-конфигурация:").await?;
-    } else {
-        log::warn!(
-            "qr requested but config not found user_id={} email={}",
-            tg_user_id,
-            username
-        );
-        bot.send_message(
-            msg.chat.id,
-            "Конфигурация не найдена. Отправь /vpn, чтобы запросить доступ.",
-        )
-        .await?;
     }
 
+    state.arm_meme_mode(actor_id)?;
+    bot.send_message(msg.chat.id, MEME_PROMPT_TEXT).await?;
     Ok(())
 }
 
@@ -326,7 +377,7 @@ async fn handle_subs(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()>
 async fn handle_requests(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
     ensure_approver(&bot, &msg, &state).await?;
 
-    let requests = state.list_requests().await?;
+    let requests = state.list_requests()?;
     if requests.is_empty() {
         bot.send_message(msg.chat.id, "Pending-запросов нет.")
             .await?;
@@ -368,13 +419,13 @@ async fn handle_delete(
 ) -> Result<()> {
     ensure_approver(&bot, &msg, &state).await?;
     let login = arg1.ok_or_else(|| anyhow!("missing login for /delete"))?;
-    let login = login.trim().trim_start_matches('@');
+    let login = normalize_login(login);
     if login.is_empty() {
         return Err(anyhow!("empty login for /delete"));
     }
 
     let client = logged_in_xui(&state).await?;
-    let deleted = client.delete_subscription_by_email(login).await?;
+    let deleted = client.delete_subscription_by_email(&login).await?;
     if deleted {
         bot.send_message(msg.chat.id, format!("Подписка `{login}` удалена."))
             .await?;
@@ -400,18 +451,7 @@ async fn handle_broadcast(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| anyhow!("missing text for /broadcast"))?;
 
-    let client = logged_in_xui(&state).await?;
-    let subs = client.list_existing_subscriptions().await?;
-    let mut recipients = std::collections::BTreeSet::<i64>::new();
-    for s in subs {
-        if let Some(tg_id) = s.tg_id
-            && let Ok(parsed) = tg_id.parse::<i64>()
-            && parsed > 0
-        {
-            recipients.insert(parsed);
-        }
-    }
-
+    let recipients = collect_recipients_from_subscriptions(&state).await?;
     if recipients.is_empty() {
         bot.send_message(
             msg.chat.id,
@@ -456,33 +496,7 @@ async fn handle_direct_message(
     let (target_raw, text) = split_target_and_text(payload)
         .ok_or_else(|| anyhow!("usage: /msg <@login|tg_id> <text>"))?;
 
-    let chat_id = if let Ok(id) = target_raw.parse::<i64>() {
-        if id <= 0 {
-            return Err(anyhow!("tg_id must be positive"));
-        }
-        id
-    } else {
-        let target_login = target_raw.trim().trim_start_matches('@').to_lowercase();
-        if target_login.is_empty() {
-            return Err(anyhow!("empty login in /msg"));
-        }
-
-        let client = logged_in_xui(&state).await?;
-        let subs = client.list_existing_subscriptions().await?;
-        let tg_id = subs
-            .into_iter()
-            .find(|s| s.email.trim().eq_ignore_ascii_case(&target_login))
-            .and_then(|s| s.tg_id)
-            .ok_or_else(|| anyhow!("user not found or tgId is empty"))?;
-        let parsed = tg_id
-            .trim()
-            .parse::<i64>()
-            .context("invalid tgId format in subscription")?;
-        if parsed <= 0 {
-            return Err(anyhow!("invalid tgId value in subscription"));
-        }
-        parsed
-    };
+    let chat_id = resolve_message_target_chat_id(target_raw, &state).await?;
 
     bot.send_message(ChatId(chat_id), text.to_string()).await?;
     bot.send_message(
@@ -527,7 +541,7 @@ async fn approve_request(
         admin_chat_id.0
     );
 
-    let Some(request) = state.take_request(request_id).await? else {
+    let Some(request) = state.take_request(request_id)? else {
         log::warn!("approve failed: request_id={} not found", request_id);
         bot.send_message(admin_chat_id, format!("Request #{request_id} not found."))
             .await?;
@@ -567,7 +581,7 @@ async fn approve_request(
     } else {
         bot.send_message(
             request.requester_chat_id,
-            "Твой запрос подтвержден, но ссылка не найдена в ответе сервера. Попробуй /qr через минуту.",
+            "Твой запрос подтвержден, но ссылка не найдена в ответе сервера. Попробуй /vpn через минуту.",
         )
         .await?;
     }
@@ -587,7 +601,7 @@ async fn deny_request(
         admin_chat_id.0
     );
 
-    let Some(request) = state.take_request(request_id).await? else {
+    let Some(request) = state.take_request(request_id)? else {
         log::warn!("deny failed: request_id={} not found", request_id);
         bot.send_message(admin_chat_id, format!("Request #{request_id} not found."))
             .await?;
@@ -630,6 +644,13 @@ fn approval_keyboard(request_id: u64) -> InlineKeyboardMarkup {
     ]])
 }
 
+fn meme_feedback_keyboard(user_chat_id: ChatId) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("лайк", format!("meme_like:{}", user_chat_id.0)),
+        InlineKeyboardButton::callback("дизлайк", format!("meme_dislike:{}", user_chat_id.0)),
+    ]])
+}
+
 fn parse_action(raw: &str) -> Option<RequestAction> {
     match raw {
         "approve" => Some(RequestAction::Approve),
@@ -655,7 +676,7 @@ async fn resolve_user_login(
 
     if !is_allowed(tg_user_id, &state.config.allow_user_ids) {
         log::warn!("access denied for user_id={} on {}", tg_user_id, command);
-        bot.send_message(msg.chat.id, "Access denied.").await?;
+        bot.send_message(msg.chat.id, ACCESS_DENIED).await?;
         return Ok(None);
     }
 
@@ -679,6 +700,54 @@ async fn ensure_approver(bot: &Bot, msg: &Message, state: &AppState) -> Result<(
     Err(anyhow!(
         "unauthorized approver command from user {actor_id}"
     ))
+}
+
+async fn collect_recipients_from_subscriptions(state: &AppState) -> Result<BTreeSet<i64>> {
+    let client = logged_in_xui(state).await?;
+    let subs = client.list_existing_subscriptions().await?;
+    let mut recipients = BTreeSet::<i64>::new();
+
+    for s in subs {
+        if let Some(tg_id) = s.tg_id
+            && let Ok(parsed) = tg_id.trim().parse::<i64>()
+            && parsed > 0
+        {
+            recipients.insert(parsed);
+        }
+    }
+
+    Ok(recipients)
+}
+
+async fn resolve_message_target_chat_id(target_raw: &str, state: &AppState) -> Result<i64> {
+    if let Ok(id) = target_raw.trim().parse::<i64>() {
+        if id > 0 {
+            return Ok(id);
+        }
+        return Err(anyhow!("tg_id must be positive"));
+    }
+
+    let target_login = normalize_login(target_raw);
+    if target_login.is_empty() {
+        return Err(anyhow!("empty login in /msg"));
+    }
+
+    let client = logged_in_xui(state).await?;
+    let subs = client.list_existing_subscriptions().await?;
+    let tg_id = subs
+        .into_iter()
+        .find(|s| normalize_login(&s.email) == target_login)
+        .and_then(|s| s.tg_id)
+        .ok_or_else(|| anyhow!("user not found or tgId is empty"))?;
+
+    let chat_id = tg_id
+        .trim()
+        .parse::<i64>()
+        .context("invalid tgId format in subscription")?;
+    if chat_id <= 0 {
+        return Err(anyhow!("invalid tgId value in subscription"));
+    }
+    Ok(chat_id)
 }
 
 async fn send_text_chunks(bot: &Bot, chat_id: ChatId, text: &str, chunk_size: usize) -> Result<()> {
@@ -750,6 +819,21 @@ fn parse_request_id(request_id: Option<&str>) -> Result<u64> {
         .context("request id must be an integer")
 }
 
+fn parse_chat_id(raw: &str) -> Result<i64> {
+    raw.parse::<i64>().context("invalid chat id")
+}
+
+async fn clear_callback_buttons(bot: &Bot, callback: &CallbackQuery) -> Result<()> {
+    if let Some(message) = callback.message.as_ref() {
+        bot.edit_message_reply_markup(message.chat().id, message.id())
+            .reply_markup(InlineKeyboardMarkup::new(
+                Vec::<Vec<InlineKeyboardButton>>::new(),
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
 fn format_login(login: &str) -> String {
     let trimmed = login.trim();
     if trimmed.is_empty() || trimmed == "-" || trimmed == "<none>" {
@@ -760,6 +844,10 @@ fn format_login(login: &str) -> String {
     } else {
         format!("@{trimmed}")
     }
+}
+
+fn normalize_login(login: &str) -> String {
+    login.trim().trim_start_matches('@').to_lowercase()
 }
 
 fn is_meme_message(msg: &Message) -> bool {

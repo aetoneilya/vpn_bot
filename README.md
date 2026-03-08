@@ -6,7 +6,7 @@ Rust Telegram bot that creates VPN users in 3X-UI.
 
 - Non-admin commands:
   - `/vpn` requests VPN access (or returns existing access immediately)
-  - `/qr` sends URL + QR for existing access
+  - `/meme` arms meme sending flow; next meme is forwarded to admin (may speed up review)
 - Existing config check by Telegram username before creating a pending request
 - `/approve <id>` and `/deny <id>` commands for manual approval
 - Admin command `/subs` shows all existing subscriptions
@@ -42,7 +42,7 @@ cargo run
 
 ## Notes
 
-- 3X-UI API endpoints differ by version/build. If `/vpn` or `/qr` fails, inspect your panel's Network tab and adjust:
+- 3X-UI API endpoints differ by version/build. If `/vpn` fails, inspect your panel's Network tab and adjust:
   - `XUI_LOGIN_PATH`
   - `XUI_ADD_CLIENT_PATH`
   - `XUI_DELETE_CLIENT_PATH`

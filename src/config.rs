@@ -82,9 +82,11 @@ fn normalize_env_value(value: String) -> Result<String> {
         bail!("environment value is empty");
     }
 
-    let unquoted = if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        || (trimmed.starts_with('"') && trimmed.ends_with('"'))
-    {
+    let is_quoted = trimmed.len() >= 2
+        && ((trimmed.starts_with('\'') && trimmed.ends_with('\''))
+            || (trimmed.starts_with('"') && trimmed.ends_with('"')));
+
+    let unquoted = if is_quoted {
         &trimmed[1..trimmed.len() - 1]
     } else {
         trimmed
