@@ -24,13 +24,15 @@ pub struct XuiClient {
 impl XuiClient {
     pub fn new(config: AppConfig) -> Result<Self> {
         log::debug!(
-            "creating xui client base_url={} inbound_id={}",
+            "creating xui client base_url={} inbound_id={} insecure_tls={}",
             config.xui_base_url,
-            config.xui_inbound_id
+            config.xui_inbound_id,
+            config.xui_insecure_tls
         );
         let http = Client::builder()
             .no_proxy()
             .cookie_store(true)
+            .danger_accept_invalid_certs(config.xui_insecure_tls)
             .build()
             .context("failed to create HTTP client")?;
         Ok(Self { http, config })
