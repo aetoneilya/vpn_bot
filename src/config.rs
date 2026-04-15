@@ -8,6 +8,7 @@ pub struct AppConfig {
     pub xui_base_url: String,
     pub xui_username: String,
     pub xui_password: String,
+    pub xui_insecure_tls: bool,
     pub xui_inbound_id: i64,
     pub xui_total_gb: u64,
     pub xui_login_path: String,
@@ -25,6 +26,7 @@ impl AppConfig {
         let xui_base_url = required_env("XUI_BASE_URL")?;
         let xui_username = required_env("XUI_USERNAME")?;
         let xui_password = required_env("XUI_PASSWORD")?;
+        let xui_insecure_tls = env_bool("XUI_INSECURE_TLS");
         let xui_inbound_id = required_env("XUI_INBOUND_ID")?
             .parse::<i64>()
             .context("XUI_INBOUND_ID must be an integer")?;
@@ -53,6 +55,7 @@ impl AppConfig {
             xui_base_url,
             xui_username,
             xui_password,
+            xui_insecure_tls,
             xui_inbound_id,
             xui_total_gb,
             xui_login_path,
@@ -74,6 +77,12 @@ pub fn required_env(key: &str) -> Result<String> {
 
 pub fn optional_env(key: &str) -> Option<String> {
     env::var(key).ok().and_then(|v| normalize_env_value(v).ok())
+}
+
+fn env_bool(key: &str) -> bool {
+    optional_env(key)
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 fn normalize_env_value(value: String) -> Result<String> {

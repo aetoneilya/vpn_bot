@@ -36,6 +36,7 @@ cargo run
 - `XUI_BASE_URL`
 - `XUI_USERNAME`
 - `XUI_PASSWORD`
+- `XUI_INSECURE_TLS` (optional, default: `false`; set to `true` only for temporary workarounds with invalid/expired certs)
 - `XUI_INBOUND_ID`
 - `APPROVER_USER_IDS`
 - `SQLITE_PATH` (optional, default: `vpn_bot.sqlite3`)
