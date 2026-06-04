@@ -4,3 +4,9 @@ vpn_bot.sqlite3
 vpn_bot.sqlite3-shm
 vpn_bot.sqlite3-wal
 .idea/
+
+# Private infrastructure scripts (contain real hosts/secrets).
+# Sanitized *.example templates are tracked; copy them and fill in real values.
+scripts/*sync-from-aeza.py
+scripts/vpn-sub-proxy.py
+scripts/aeza-native-subscription.py

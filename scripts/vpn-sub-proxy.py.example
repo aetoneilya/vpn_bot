@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Subscription proxy that filters/rewrites x-ui subscription links per route.
+
+Copy this file to `vpn-sub-proxy.py` and fill in the values below (or export the
+matching env vars). The real script is gitignored so your hosts stay private.
+
+Env vars (all optional, fall back to the placeholder defaults):
+  SUB_PROXY_LISTEN_HOST   address to bind (default 127.0.0.1)
+  SUB_PROXY_LISTEN_PORT   port to bind (default 2097)
+  SUB_PROXY_UPSTREAM      x-ui subscription upstream (default http://127.0.0.1:2096)
+  SUB_PROXY_PRIMARY_HOST  public host advertised for the primary route
+  SUB_PROXY_RELAY_HOST    public host advertised for the relay route
+"""
+import base64
+import binascii
+import html
+import http.server
+import json
+import os
+import sqlite3
+import subprocess
+import urllib.parse
+import urllib.request
+
+LISTEN = (
+    os.environ.get("SUB_PROXY_LISTEN_HOST", "127.0.0.1"),
+    int(os.environ.get("SUB_PROXY_LISTEN_PORT", "2097")),
+)
+UPSTREAM = os.environ.get("SUB_PROXY_UPSTREAM", "http://127.0.0.1:2096")
+XUI_DB = os.environ.get("XUI_DB_PATH", "/etc/x-ui/x-ui.db")
+XRAY = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
+
+PRIMARY_HOST = os.environ.get("SUB_PROXY_PRIMARY_HOST", "vpn.example.com")
+RELAY_HOST = os.environ.get("SUB_PROXY_RELAY_HOST", "relay.example.com")
+
+ROUTES = {
+    "/sub/": {
+        "host": RELAY_HOST,
+        "address": RELAY_HOST,
+        "inbound_tag": "inbound-443-ru-proxy",
+        "title": "Relay subscription",
+        "upstream_prefix": "/sub/",
+        "include_prefix": "vless-reality-ru-proxy-",
+        "exclude_prefix": None,
+    },
+    "/sub-direct/": {
+        "host": PRIMARY_HOST,
+        "address": PRIMARY_HOST,
+        "inbound_tag": "inbound-443",
+        "title": "Direct subscription",
+        "upstream_prefix": "/sub/",
+        "include_prefix": "vless-reality-",
+        "exclude_prefix": "vless-reality-ru-proxy-",
+    },
+}
+PUBLIC_KEY_CACHE = {}
+
+
+def decode_subscription(raw: bytes) -> str:
+    compact = b"".join(raw.split())
+    padding = b"=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(compact + padding, validate=False).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return raw.decode("utf-8", "replace")
+
+
+def encode_subscription(text: str) -> bytes:
+    return base64.b64encode(text.encode("utf-8")) + b"\n"
+
+
+def link_fragment(line: str) -> str:
+    if not line.startswith("vless://"):
+        return ""
+    parsed = urllib.parse.urlsplit(line)
+    return urllib.parse.unquote(parsed.fragment)
+
+
+def route_matches(line: str, route: dict) -> bool:
+    fragment = link_fragment(line)
+    if not fragment:
+        return False
+    include_prefix = route.get("include_prefix")
+    exclude_prefix = route.get("exclude_prefix")
+    if include_prefix and not fragment.startswith(include_prefix):
+        return False
+    if exclude_prefix and fragment.startswith(exclude_prefix):
+        return False
+    return True
+
+
+def public_key_for_inbound(tag: str) -> str | None:
+    if tag in PUBLIC_KEY_CACHE:
+        return PUBLIC_KEY_CACHE[tag]
+
+    with sqlite3.connect(XUI_DB) as con:
+        row = con.execute(
+            "select stream_settings from inbounds where tag = ?", (tag,)
+        ).fetchone()
+    if not row:
+        return None
+
+    reality = json.loads(row[0]).get("realitySettings") or {}
+    if public_key := reality.get("publicKey"):
+        PUBLIC_KEY_CACHE[tag] = public_key
+        return public_key
+
+    private_key = reality.get("privateKey")
+    if not private_key:
+        return None
+
+    output = subprocess.check_output([XRAY, "x25519", "-i", private_key], text=True)
+    for line in output.splitlines():
+        if "PublicKey" in line or "Password (PublicKey)" in line:
+            public_key = line.split(":", 1)[1].strip()
+            PUBLIC_KEY_CACHE[tag] = public_key
+            return public_key
+    return None
+
+
+def rewrite_link(line: str, route: dict) -> str:
+    parsed = urllib.parse.urlsplit(line)
+    userinfo, _, hostport = parsed.netloc.rpartition("@")
+    userinfo = f"{userinfo}@" if userinfo else ""
+    try:
+        port = urllib.parse.urlsplit(line).port
+    except ValueError:
+        port = None
+    if port is None and ":" in hostport:
+        port = hostport.rsplit(":", 1)[1]
+    netloc = f"{userinfo}{route['address']}"
+    if port:
+        netloc = f"{netloc}:{port}"
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    public_key = public_key_for_inbound(route["inbound_tag"])
+    if public_key:
+        query = [("pbk", public_key) if key == "pbk" else (key, value) for key, value in query]
+    encoded_query = urllib.parse.urlencode(query)
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, netloc, parsed.path, encoded_query, parsed.fragment)
+    )
+
+
+def looks_like_browser(headers) -> bool:
+    accept = headers.get("Accept", "")
+    user_agent = headers.get("User-Agent", "")
+    if "text/html" not in accept:
+        return False
+    lower_ua = user_agent.lower()
+    vpn_clients = ["v2ray", "xray", "sing-box", "nekobox", "hiddify", "streisand"]
+    return not any(client in lower_ua for client in vpn_clients)
+
+
+def render_html_page(title: str, subscription_url: str, links: list[str]) -> bytes:
+    rows = []
+    for link in links:
+        parsed = urllib.parse.urlsplit(link)
+        query = urllib.parse.parse_qs(parsed.query)
+        address = parsed.netloc.split("@", 1)[-1]
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(urllib.parse.unquote(parsed.fragment))}</td>"
+            f"<td>{html.escape(address)}</td>"
+            f"<td>{html.escape(query.get('sni', [''])[0])}</td>"
+            "</tr>"
+        )
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f6f7f9; color: #15171a; }}
+    main {{ max-width: 760px; margin: 48px auto; padding: 0 20px; }}
+    section {{ background: white; border: 1px solid #dde1e7; border-radius: 8px; padding: 24px; }}
+    h1 {{ font-size: 24px; margin: 0 0 16px; }}
+    p {{ line-height: 1.5; }}
+    code {{ display: block; overflow-wrap: anywhere; background: #f0f2f5; border-radius: 6px; padding: 12px; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 18px; }}
+    th, td {{ text-align: left; border-bottom: 1px solid #e6e8ec; padding: 10px 8px; font-size: 14px; }}
+    button {{ margin-top: 12px; padding: 10px 14px; border: 0; border-radius: 6px; background: #1769e0; color: white; font-weight: 600; cursor: pointer; }}
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>{html.escape(title)}</h1>
+      <p>Copy this subscription URL and add it in your VPN client as a subscription.</p>
+      <code id="url">{html.escape(subscription_url)}</code>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('url').textContent)">Copy URL</button>
+      <table>
+        <thead><tr><th>Profile</th><th>Address</th><th>SNI</th></tr></thead>
+        <tbody>{''.join(rows)}</tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>
+"""
+    return body.encode("utf-8")
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "vpn-sub-proxy/2.0"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def do_HEAD(self):
+        self.handle_request(head=True)
+
+    def do_GET(self):
+        self.handle_request(head=False)
+
+    def do_POST(self):
+        self.send_error(405)
+
+    def handle_request(self, head: bool):
+        parsed_path = urllib.parse.urlsplit(self.path)
+        route = None
+        rest = None
+        for prefix, config in ROUTES.items():
+            if parsed_path.path.startswith(prefix):
+                route = config
+                rest = parsed_path.path[len(prefix) :]
+                break
+        if not route or not rest:
+            self.send_error(404)
+            return
+
+        upstream_path = route["upstream_prefix"] + rest
+        if parsed_path.query:
+            upstream_path += "?" + parsed_path.query
+        req = urllib.request.Request(UPSTREAM + upstream_path, method="GET")
+        req.add_header("Host", route["host"])
+        req.add_header("X-Forwarded-Proto", "https")
+        req.add_header("X-Requested-With", "XMLHttpRequest")
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                raw = response.read()
+                status = response.status
+        except Exception as exc:
+            self.send_error(502, str(exc))
+            return
+
+        text = decode_subscription(raw)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        filtered = [
+            rewrite_link(line, route)
+            for line in lines
+            if route_matches(line, route)
+        ]
+        if not filtered:
+            self.send_error(502, "subscription route produced no links")
+            return
+
+        if not head and looks_like_browser(self.headers):
+            subscription_url = f"https://{self.headers.get('Host', PRIMARY_HOST)}{self.path}"
+            body = render_html_page(route["title"], subscription_url, filtered)
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        body = encode_subscription("\n".join(filtered))
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Profile-Web-Page-Url",
+            f"https://{self.headers.get('Host', PRIMARY_HOST)}{self.path}",
+        )
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not head:
+            self.wfile.write(body)
+
+
+if __name__ == "__main__":
+    http.server.ThreadingHTTPServer(LISTEN, Handler).serve_forever()

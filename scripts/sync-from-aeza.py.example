@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Sync an upstream (Aeza) reality inbound into a local relay xray ingress config.
+
+Copy this file to `sync-from-aeza.py` and fill in the values below (or export the
+matching env vars). The real script is gitignored so your hosts, panel secret
+path and SSH key location stay private.
+
+Env vars:
+  INGRESS_BASE      local ingress dir (default /opt/relay-ingress)
+  AEZA_SSH_REMOTE   ssh target, e.g. root@upstream.example.com
+  AEZA_SSH_KEY      path to ssh private key
+  AEZA_HOST         upstream reality address advertised to clients
+  AEZA_PORT         upstream reality port (default 443)
+  RELAY_EMAIL       email/identifier of the relay client on the upstream inbound
+  XUI_PANEL_BASE    upstream x-ui panel base incl. secret path, e.g.
+                    http://127.0.0.1:2053/<panel-secret-path>
+                    (XUI_API_TOKEN is read from /opt/vpn-bot/.env on the remote)
+  INGRESS_SERVICE   systemd unit to restart (default relay-xray-ingress)
+  INGRESS_LISTEN    local listen address for the ingress inbound (default 0.0.0.0)
+"""
+import copy
+import json
+import os
+import shlex
+import subprocess
+from pathlib import Path
+
+BASE = Path(os.environ.get("INGRESS_BASE", "/opt/relay-ingress"))
+CONFIG = BASE / "config.json"
+LAST = BASE / ".last-ingress-source.json"
+REMOTE = os.environ.get("AEZA_SSH_REMOTE", "root@upstream.example.com")
+SSH_KEY = os.environ.get("AEZA_SSH_KEY", "/root/.ssh/relay-to-upstream")
+RELAY_EMAIL = os.environ.get("RELAY_EMAIL", "egress-relay")
+DIRECT_TAG = "inbound-443"
+INGRESS_TAG = "inbound-443-ru-proxy"
+AEZA_HOST = os.environ.get("AEZA_HOST", "upstream.example.com")
+AEZA_PORT = int(os.environ.get("AEZA_PORT", "443"))
+XUI_PANEL_BASE = os.environ.get("XUI_PANEL_BASE", "http://127.0.0.1:2053/<panel-secret-path>")
+INGRESS_SERVICE = os.environ.get("INGRESS_SERVICE", "relay-xray-ingress")
+INGRESS_LISTEN = os.environ.get("INGRESS_LISTEN", "0.0.0.0")
+
+SSH = [
+    "ssh",
+    "-i",
+    SSH_KEY,
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    REMOTE,
+]
+REMOTE_CMD = rf"""
+set -e
+set -a
+. /opt/vpn-bot/.env
+set +a
+BASE={XUI_PANEL_BASE}
+curl -sS --max-time 15 -H "Authorization: Bearer $XUI_API_TOKEN" -H "X-Requested-With: XMLHttpRequest" "$BASE/panel/api/server/getConfigJson"
+"""
+
+
+def fetch_source():
+    raw = subprocess.check_output(SSH + ["bash -lc " + shlex.quote(REMOTE_CMD)], text=True)
+    data = json.loads(raw)
+    if not data.get("success"):
+        raise RuntimeError(raw)
+
+    cfg = data["obj"]
+    direct_inbound = next(i for i in cfg["inbounds"] if i.get("tag") == DIRECT_TAG)
+    ingress_inbound = next(i for i in cfg["inbounds"] if i.get("tag") == INGRESS_TAG)
+
+    direct_clients = direct_inbound["settings"].get("clients", [])
+    relay_client = next((c for c in direct_clients if c.get("email") == RELAY_EMAIL), None)
+    if not relay_client:
+        raise RuntimeError(f"missing {RELAY_EMAIL} client on upstream inbound {DIRECT_TAG}")
+
+    settings = copy.deepcopy(ingress_inbound["settings"])
+    settings["clients"] = [
+        c for c in settings.get("clients", []) if c.get("email") != RELAY_EMAIL
+    ]
+    if not settings["clients"]:
+        raise RuntimeError(f"missing user clients on upstream inbound {INGRESS_TAG}")
+
+    return {
+        "settings": settings,
+        "ingressStreamSettings": ingress_inbound["streamSettings"],
+        "egressStreamSettings": direct_inbound["streamSettings"],
+        "sniffing": ingress_inbound.get(
+            "sniffing", {"enabled": True, "destOverride": ["http", "tls", "quic"]}
+        ),
+        "relayClient": relay_client,
+    }
+
+
+def derive_public_key(private_key):
+    out = subprocess.check_output(
+        [str(BASE / "xray"), "x25519", "-i", private_key], text=True
+    )
+    for line in out.splitlines():
+        if "PublicKey" in line or "Public key" in line:
+            return line.split(":", 1)[1].strip()
+    raise RuntimeError("xray x25519 did not return a public key")
+
+
+def build_egress_outbound(src):
+    stream = src["egressStreamSettings"]
+    rs = stream.get("realitySettings", {})
+    server_names = rs.get("serverNames") or [rs.get("serverName") or "www.microsoft.com"]
+    short_ids = rs.get("shortIds") or [rs.get("shortId") or ""]
+    public_key = rs.get("publicKey") or derive_public_key(rs["privateKey"])
+    user = {
+        "id": src["relayClient"]["id"],
+        "encryption": "none",
+    }
+    flow = src["relayClient"].get("flow")
+    if flow:
+        user["flow"] = flow
+    return {
+        "tag": "upstream-egress",
+        "protocol": "vless",
+        "settings": {
+            "vnext": [
+                {
+                    "address": AEZA_HOST,
+                    "port": AEZA_PORT,
+                    "users": [user],
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": stream.get("network", "tcp"),
+            "security": "reality",
+            "realitySettings": {
+                "serverName": server_names[0],
+                "fingerprint": "chrome",
+                "publicKey": public_key,
+                "shortId": short_ids[0],
+                "spiderX": rs.get("spiderX", "/"),
+            },
+        },
+    }
+
+
+def build_config(src):
+    return {
+        "log": {"loglevel": "warning"},
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"},
+                {
+                    "type": "field",
+                    "protocol": ["bittorrent"],
+                    "outboundTag": "blocked",
+                },
+                {
+                    "type": "field",
+                    "domain": ["domain:ru", "domain:рф"],
+                    "ip": ["ext:geoip_RU.dat:ru", "geoip:ru"],
+                    "outboundTag": "direct",
+                },
+            ],
+        },
+        "inbounds": [
+            {
+                "tag": "relay-ingress-443",
+                "listen": INGRESS_LISTEN,
+                "port": 443,
+                "protocol": "vless",
+                "settings": src["settings"],
+                "streamSettings": src["ingressStreamSettings"],
+                "sniffing": src["sniffing"],
+            }
+        ],
+        "outbounds": [
+            build_egress_outbound(src),
+            {
+                "tag": "direct",
+                "protocol": "freedom",
+                "settings": {"domainStrategy": "AsIs"},
+            },
+            {"tag": "blocked", "protocol": "blackhole", "settings": {}},
+        ],
+    }
+
+
+def main():
+    src = fetch_source()
+    src_text = json.dumps(src, sort_keys=True, ensure_ascii=False)
+    if LAST.exists() and LAST.read_text() == src_text:
+        print("unchanged")
+        return
+    new_cfg = build_config(src)
+    tmp = CONFIG.with_name("config.tmp.json")
+    tmp.write_text(json.dumps(new_cfg, indent=2, ensure_ascii=False) + "\n")
+    subprocess.check_call(
+        [str(BASE / "xray"), "run", "-test", "-config", str(tmp)], cwd=str(BASE)
+    )
+    tmp.replace(CONFIG)
+    LAST.write_text(src_text)
+    subprocess.check_call(["systemctl", "restart", INGRESS_SERVICE])
+    print("synced")
+
+
+if __name__ == "__main__":
+    main()

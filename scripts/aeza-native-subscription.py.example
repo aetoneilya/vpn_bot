@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Rewrite x-ui inbound stream settings to advertise public reality endpoints.
+
+Copy this file to `aeza-native-subscription.py` and set the public hosts (or
+export the matching env vars). The real script is gitignored.
+
+Env vars:
+  XUI_DB_PATH        path to x-ui.db (default /etc/x-ui/x-ui.db)
+  XRAY_BIN           xray binary (default /usr/local/bin/xray)
+  DIRECT_PUBLIC_HOST public host for the direct inbound (default vpn.example.com)
+  RELAY_PUBLIC_HOST  public host for the relay inbound (default relay.example.com)
+"""
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import time
+from pathlib import Path
+
+DB = Path(os.environ.get("XUI_DB_PATH", "/etc/x-ui/x-ui.db"))
+XRAY = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
+
+DIRECT_PUBLIC_HOST = os.environ.get("DIRECT_PUBLIC_HOST", "vpn.example.com")
+RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "relay.example.com")
+
+
+def public_key(private_key: str) -> str:
+    output = subprocess.check_output(
+        [XRAY, "x25519", "-i", private_key], text=True
+    )
+    for line in output.splitlines():
+        if "PublicKey" in line or "Password (PublicKey)" in line:
+            return line.split(":", 1)[1].strip()
+    raise RuntimeError("missing public key")
+
+
+def update_stream(stream_text: str, public_dest: str) -> str:
+    stream = json.loads(stream_text)
+    stream["externalProxy"] = [
+        {"dest": public_dest, "port": 443, "remark": "", "forceTls": "same"}
+    ]
+    reality = stream.setdefault("realitySettings", {})
+    settings = reality.setdefault("settings", {})
+    settings["publicKey"] = public_key(reality["privateKey"])
+    settings["fingerprint"] = settings.get("fingerprint") or "chrome"
+    settings["spiderX"] = settings.get("spiderX") or "/"
+    return json.dumps(stream, ensure_ascii=False, separators=(",", ":"))
+
+
+def main():
+    backup = DB.with_name(f"x-ui.db.bak-native-sub-{time.strftime('%Y%m%d-%H%M%S')}")
+    shutil.copy2(DB, backup)
+
+    con = sqlite3.connect(DB)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("BEGIN")
+        direct = con.execute(
+            "select id, stream_settings from inbounds where tag = 'inbound-443'"
+        ).fetchone()
+        ru = con.execute(
+            "select id, stream_settings from inbounds where tag = 'inbound-443-ru-proxy'"
+        ).fetchone()
+        if not direct or not ru:
+            raise RuntimeError("missing direct or ru inbound")
+
+        con.execute(
+            "update inbounds set remark = ?, stream_settings = ? where id = ?",
+            (
+                "vless-reality",
+                update_stream(direct["stream_settings"], DIRECT_PUBLIC_HOST),
+                direct["id"],
+            ),
+        )
+        con.execute(
+            "update inbounds set remark = ?, stream_settings = ? where id = ?",
+            (
+                "ru-vless-reality",
+                update_stream(ru["stream_settings"], RELAY_PUBLIC_HOST),
+                ru["id"],
+            ),
+        )
+        con.commit()
+        print(json.dumps({"backup": str(backup), "updated": True}, ensure_ascii=False))
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+if __name__ == "__main__":
+    main()
