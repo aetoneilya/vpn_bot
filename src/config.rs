@@ -1,121 +1,209 @@
 use std::collections::HashSet;
 use std::env;
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result, anyhow, bail};
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
-    pub xui_base_url: String,
-    pub xui_username: String,
-    pub xui_password: String,
-    pub xui_insecure_tls: bool,
-    pub xui_inbound_id: i64,
-    pub xui_total_gb: u64,
-    pub xui_login_path: String,
-    pub xui_add_client_path: String,
-    pub xui_delete_client_path: String,
-    pub xui_get_inbound_path: String,
-    pub xui_list_inbounds_path: String,
+    pub panel: PanelConfig,
     pub sqlite_path: String,
+    /// When set, only these Telegram users may request access.
     pub allow_user_ids: Option<HashSet<u64>>,
     pub approver_user_ids: HashSet<u64>,
+    pub health: Option<HealthConfig>,
+    pub web: Option<WebConfig>,
+}
+
+/// Telegram Mini App server; enabled when `WEB_PUBLIC_URL` is set.
+#[derive(Clone, Debug)]
+pub struct WebConfig {
+    /// Local address the HTTP server binds to; TLS is terminated in front of it.
+    pub listen: SocketAddr,
+    /// Public HTTPS URL of the Mini App, as opened by Telegram.
+    pub public_url: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PanelConfig {
+    /// Panel root including the secret web base path, e.g. `http://127.0.0.1:61563/<path>`.
+    pub base_url: String,
+    pub auth: PanelAuth,
+    /// Every new client is attached to all of these inbounds.
+    pub inbound_ids: Vec<i64>,
+    /// VLESS flow for new clients: empty for XHTTP/gRPC, `xtls-rprx-vision` for raw TCP Reality.
+    pub client_flow: String,
+    /// Traffic limit for new clients in GB; 0 means unlimited.
+    pub total_gb: u64,
+    /// Public subscription base, e.g. `https://sub.example.com:2096/sub/`.
+    pub subscription_base_url: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum PanelAuth {
+    Token(String),
+    Password { username: String, password: String },
+}
+
+/// End-to-end checks of the relay chain; disabled when `HEALTH_RELAY_ADDR` is unset.
+#[derive(Clone, Debug)]
+pub struct HealthConfig {
+    pub relay_addr: SocketAddr,
+    pub snis: Vec<String>,
+    pub subscription_url: Option<String>,
+    pub interval_secs: u64,
+    pub fail_threshold: u32,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
-        let xui_base_url = required_env("XUI_BASE_URL")?;
-        let xui_username = required_env("XUI_USERNAME")?;
-        let xui_password = required_env("XUI_PASSWORD")?;
-        let xui_insecure_tls = env_bool("XUI_INSECURE_TLS");
-        let xui_inbound_id = required_env("XUI_INBOUND_ID")?
-            .parse::<i64>()
-            .context("XUI_INBOUND_ID must be an integer")?;
-
-        let xui_total_gb = env::var("XUI_TOTAL_GB")
-            .unwrap_or_else(|_| "0".to_string())
-            .parse::<u64>()
-            .context("XUI_TOTAL_GB must be an integer")?;
-
-        let xui_login_path = env::var("XUI_LOGIN_PATH").unwrap_or_else(|_| "/login".to_string());
-        let xui_add_client_path = env::var("XUI_ADD_CLIENT_PATH")
-            .unwrap_or_else(|_| "/panel/api/inbounds/addClient".to_string());
-        let xui_delete_client_path = env::var("XUI_DELETE_CLIENT_PATH")
-            .unwrap_or_else(|_| "/panel/api/inbounds/{id}/delClient/{clientId}".to_string());
-        let xui_get_inbound_path = env::var("XUI_GET_INBOUND_PATH")
-            .unwrap_or_else(|_| "/panel/api/inbounds/get/{id}".to_string());
-        let xui_list_inbounds_path = env::var("XUI_LIST_INBOUNDS_PATH")
-            .unwrap_or_else(|_| "/panel/api/inbounds/list".to_string());
-        let sqlite_path = env::var("SQLITE_PATH").unwrap_or_else(|_| "vpn_bot.sqlite3".to_string());
-
-        let allow_user_ids = parse_user_ids(optional_env("ALLOW_USER_IDS"));
-        let approver_user_ids = parse_user_ids(Some(required_env("APPROVER_USER_IDS")?))
-            .ok_or_else(|| anyhow!("APPROVER_USER_IDS must contain at least one user id"))?;
+        let approver_user_ids = parse_user_ids(&required_env("APPROVER_USER_IDS")?);
+        if approver_user_ids.is_empty() {
+            bail!("APPROVER_USER_IDS must contain at least one user id");
+        }
 
         Ok(Self {
-            xui_base_url,
-            xui_username,
-            xui_password,
-            xui_insecure_tls,
-            xui_inbound_id,
-            xui_total_gb,
-            xui_login_path,
-            xui_add_client_path,
-            xui_delete_client_path,
-            xui_get_inbound_path,
-            xui_list_inbounds_path,
-            sqlite_path,
-            allow_user_ids,
+            panel: PanelConfig::from_env()?,
+            sqlite_path: optional_env("SQLITE_PATH").unwrap_or_else(|| "vpn_bot.sqlite3".into()),
+            allow_user_ids: optional_env("ALLOW_USER_IDS")
+                .map(|v| parse_user_ids(&v))
+                .filter(|ids| !ids.is_empty()),
             approver_user_ids,
+            health: HealthConfig::from_env()?,
+            web: WebConfig::from_env()?,
+        })
+    }
+
+    pub fn is_approver(&self, user_id: u64) -> bool {
+        self.approver_user_ids.contains(&user_id)
+    }
+
+    pub fn is_allowed(&self, user_id: u64) -> bool {
+        self.allow_user_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&user_id))
+    }
+}
+
+impl PanelConfig {
+    fn from_env() -> Result<Self> {
+        let auth = match optional_env("XUI_API_TOKEN") {
+            Some(token) => PanelAuth::Token(token),
+            None => PanelAuth::Password {
+                username: required_env("XUI_USERNAME")
+                    .context("set XUI_API_TOKEN or XUI_USERNAME/XUI_PASSWORD")?,
+                password: required_env("XUI_PASSWORD")
+                    .context("set XUI_API_TOKEN or XUI_USERNAME/XUI_PASSWORD")?,
+            },
+        };
+
+        let inbound_ids = parse_list::<i64>(&required_env("XUI_INBOUND_IDS")?)
+            .context("XUI_INBOUND_IDS must be comma-separated integers")?;
+        if inbound_ids.is_empty() {
+            bail!("XUI_INBOUND_IDS must contain at least one inbound id");
+        }
+
+        let mut subscription_base_url = required_env("XUI_SUBSCRIPTION_BASE_URL")?;
+        if !subscription_base_url.ends_with('/') {
+            subscription_base_url.push('/');
+        }
+
+        Ok(Self {
+            base_url: required_env("XUI_BASE_URL")?
+                .trim_end_matches('/')
+                .to_string(),
+            auth,
+            inbound_ids,
+            client_flow: optional_env("XUI_CLIENT_FLOW").unwrap_or_default(),
+            total_gb: parse_optional("XUI_TOTAL_GB")?.unwrap_or(0),
+            subscription_base_url,
         })
     }
 }
 
-pub fn required_env(key: &str) -> Result<String> {
-    let raw = env::var(key).with_context(|| format!("{key} is not set"))?;
-    normalize_env_value(raw)
+impl HealthConfig {
+    fn from_env() -> Result<Option<Self>> {
+        let Some(relay_addr) = optional_env("HEALTH_RELAY_ADDR") else {
+            return Ok(None);
+        };
+
+        Ok(Some(Self {
+            relay_addr: relay_addr
+                .parse()
+                .context("HEALTH_RELAY_ADDR must be ip:port")?,
+            snis: parse_list::<String>(
+                &optional_env("HEALTH_SNIS").unwrap_or_else(|| "ign.com".into()),
+            )?,
+            subscription_url: optional_env("HEALTH_SUBSCRIPTION_URL"),
+            interval_secs: parse_optional("HEALTH_INTERVAL_SECS")?.unwrap_or(300),
+            fail_threshold: parse_optional::<u32>("HEALTH_FAIL_THRESHOLD")?
+                .unwrap_or(2)
+                .max(1),
+        }))
+    }
 }
 
-pub fn optional_env(key: &str) -> Option<String> {
-    env::var(key).ok().and_then(|v| normalize_env_value(v).ok())
+impl WebConfig {
+    fn from_env() -> Result<Option<Self>> {
+        let Some(public_url) = optional_env("WEB_PUBLIC_URL") else {
+            return Ok(None);
+        };
+        if !public_url.starts_with("https://") {
+            bail!("WEB_PUBLIC_URL must be an https:// URL (Telegram requires it)");
+        }
+        Ok(Some(Self {
+            listen: optional_env("WEB_LISTEN")
+                .unwrap_or_else(|| "127.0.0.1:8080".into())
+                .parse()
+                .context("WEB_LISTEN must be ip:port")?,
+            public_url,
+        }))
+    }
 }
 
-fn env_bool(key: &str) -> bool {
+fn required_env(key: &str) -> Result<String> {
+    optional_env(key).ok_or_else(|| anyhow!("{key} is not set"))
+}
+
+/// Reads a variable, trimming whitespace and surrounding quotes; empty values count as unset.
+fn optional_env(key: &str) -> Option<String> {
+    let raw = env::var(key).ok()?;
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed)
+        .trim();
+    (!unquoted.is_empty()).then(|| unquoted.to_string())
+}
+
+fn parse_optional<T: std::str::FromStr>(key: &str) -> Result<Option<T>> {
     optional_env(key)
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+        .map(|v| {
+            v.parse::<T>()
+                .map_err(|_| anyhow!("{key} has invalid value `{v}`"))
+        })
+        .transpose()
 }
 
-fn normalize_env_value(value: String) -> Result<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        bail!("environment value is empty");
-    }
-
-    let is_quoted = trimmed.len() >= 2
-        && ((trimmed.starts_with('\'') && trimmed.ends_with('\''))
-            || (trimmed.starts_with('"') && trimmed.ends_with('"')));
-
-    let unquoted = if is_quoted {
-        &trimmed[1..trimmed.len() - 1]
-    } else {
-        trimmed
-    };
-
-    Ok(unquoted.trim().to_string())
+fn parse_list<T: std::str::FromStr>(raw: &str) -> Result<Vec<T>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| {
+            v.parse::<T>()
+                .map_err(|_| anyhow!("invalid list item `{v}`"))
+        })
+        .collect()
 }
 
-fn parse_user_ids(value: Option<String>) -> Option<HashSet<u64>> {
-    let raw = value?;
-    let ids: HashSet<u64> = raw
-        .split(',')
+fn parse_user_ids(raw: &str) -> HashSet<u64> {
+    raw.split(',')
         .filter_map(|v| v.trim().parse::<u64>().ok())
-        .collect();
-    if ids.is_empty() { None } else { Some(ids) }
-}
-
-pub fn is_allowed(user_id: u64, allowlist: &Option<HashSet<u64>>) -> bool {
-    match allowlist {
-        Some(ids) => ids.contains(&user_id),
-        None => true,
-    }
+        .collect()
 }

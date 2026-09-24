@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VPN</title>
+<script src="https://telegram.org/js/telegram-web-app.js" async></script>
+<style>
+  /* Colors come from Telegram theme params (set on :root by applyTheme); these are fallbacks. */
+  :root {
+    --bg: var(--tg-secondary-bg, #efeff4);
+    --card: var(--tg-section-bg, var(--tg-bg, #ffffff));
+    --text: var(--tg-text, #000000);
+    --hint: var(--tg-hint, #8e8e93);
+    --accent: var(--tg-accent, var(--tg-link, #2481cc));
+    --button: var(--tg-button, #2481cc);
+    --button-text: var(--tg-button-text, #ffffff);
+    --section-header: var(--tg-section-header, var(--hint));
+    --separator: var(--tg-separator, rgba(128, 128, 128, .22));
+    --ok: #34c759;
+    --warn: #ff9500;
+    --danger: var(--tg-destructive, #ff3b30);
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-tg-theme]) {
+      --bg: #0f0f0f; --card: #1c1c1e; --text: #ffffff; --hint: #8e8e93;
+      --accent: #5aa7ec; --button: #3e88d6;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    padding: 12px 16px calc(28px + env(safe-area-inset-bottom));
+    max-width: 560px; margin: 0 auto;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  a { color: var(--accent); text-decoration: none; }
+  .hidden { display: none !important; }
+
+  /* Hero */
+  .hero { text-align: center; padding: 20px 8px 8px; }
+  .hero-icon {
+    width: 76px; height: 76px; margin: 0 auto 14px; border-radius: 50%;
+    display: grid; place-items: center; color: #fff;
+    background: var(--accent);
+  }
+  .hero-icon svg { width: 38px; height: 38px; }
+  .hero-icon.ok { background: var(--ok); }
+  .hero-icon.wait { background: var(--warn); }
+  .hero-icon.muted { background: var(--hint); }
+  .hero h1 { font-size: 24px; line-height: 1.2; margin: 0 0 6px; font-weight: 700; }
+  .hero p { margin: 0 auto; color: var(--hint); font-size: 15px; max-width: 360px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 12px;
+    padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok);
+  }
+  .pill.wait { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+  /* Grouped sections */
+  .section { margin-top: 22px; }
+  .section-title {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .02em;
+    color: var(--section-header); margin: 0 16px 7px;
+  }
+  .section-note { font-size: 13px; color: var(--hint); margin: 7px 16px 0; }
+  .card { background: var(--card); border-radius: var(--radius); overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 11px 16px; min-height: 48px; width: 100%; text-align: left; }
+  .row + .row { border-top: 0.5px solid var(--separator); }
+  .row-icon {
+    flex: none; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    background: var(--accent); color: #fff; font-size: 16px;
+  }
+  .row-icon svg { width: 18px; height: 18px; }
+  .row-icon.flag { background: none; font-size: 24px; }
+  .row-body { flex: 1; min-width: 0; }
+  .row-title { font-weight: 500; }
+  .row-sub { color: var(--hint); font-size: 14px; margin-top: 1px; }
+  .row-action { color: var(--accent); font-weight: 500; flex: none; }
+  .row.link .row-title { color: var(--accent); }
+  .mono { font: 14px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Steps */
+  .step { display: flex; gap: 12px; padding: 12px 16px; }
+  .step + .step { border-top: 0.5px solid var(--separator); }
+  .step-num {
+    flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+    background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+    font-size: 13px; font-weight: 700; margin-top: 1px;
+  }
+  .step-body { flex: 1; }
+  .step-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
+    font-size: 14px; font-weight: 600;
+  }
+
+  /* Segmented control */
+  .segmented {
+    display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; padding: 2px;
+    background: color-mix(in srgb, var(--hint) 18%, transparent); border-radius: 9px; margin-bottom: 10px;
+  }
+  .segmented button { padding: 6px 4px; border-radius: 7px; font-size: 13px; font-weight: 500; }
+  .segmented button[aria-pressed="true"] { background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+
+  /* Timeline */
+  .timeline .step-num.done { background: var(--ok); color: #fff; }
+  .timeline .step-num.now { background: var(--warn); color: #fff; }
+  .timeline .step-num.todo { background: color-mix(in srgb, var(--hint) 20%, transparent); color: var(--hint); }
+
+  /* Accordion */
+  details { background: var(--card); border-radius: var(--radius); }
+  details + details { margin-top: 10px; }
+  summary { list-style: none; display: flex; align-items: center; gap: 12px; padding: 11px 16px; min-height: 48px; cursor: pointer; font-weight: 500; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "›"; margin-left: auto; color: var(--hint); font-size: 22px; transition: transform .2s; }
+  details[open] summary::after { transform: rotate(90deg); }
+  .details-body { padding: 0 16px 14px; color: var(--text); font-size: 15px; }
+  .details-body ol { margin: 0; padding-left: 20px; }
+  .details-body li { margin: 5px 0; }
+  .qr { display: block; width: 210px; max-width: 70%; margin: 4px auto 6px; border-radius: 12px; background: #fff; padding: 10px; image-rendering: pixelated; }
+
+  /* Primary button (fallback when Telegram MainButton is unavailable) */
+  .primary {
+    display: block; width: 100%; margin-top: 22px; padding: 14px 16px; border-radius: var(--radius);
+    background: var(--button); color: var(--button-text); font-weight: 600; text-align: center;
+  }
+  .primary:disabled { opacity: .6; }
+  .primary.secondary { background: var(--card); color: var(--accent); }
+
+  /* Skeleton */
+  .sk { background: color-mix(in srgb, var(--hint) 18%, transparent); border-radius: 8px; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+
+  /* VPN status + latency chart */
+  .status-head { display: flex; align-items: center; gap: 10px; padding: 0 16px 4px; }
+  .status-body { padding-bottom: 2px; border-top: 0.5px solid var(--separator); padding-top: 12px; }
+  .summary-meta { margin-left: auto; color: var(--hint); font-weight: 400; font-size: 15px; font-variant-numeric: tabular-nums; }
+  summary .summary-meta + * { margin-left: 0; }
+  #vpn-status-details summary::after { margin-left: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--hint); flex: none; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent); }
+  .dot.bad { background: var(--danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 20%, transparent); }
+  .status-text { font-weight: 600; flex: 1; }
+  .status-time { color: var(--hint); font-size: 13px; }
+  .ping { display: flex; align-items: baseline; gap: 8px; padding: 6px 16px 0; }
+  .ping-value { font-size: 34px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .ping-unit { color: var(--hint); font-size: 15px; }
+  .ping-label { color: var(--hint); font-size: 13px; padding: 0 16px; }
+  .chart-wrap { position: relative; padding: 10px 8px 4px; }
+  .chart { display: block; width: 100%; height: 150px; touch-action: pan-y; }
+  .chart .grid { stroke: var(--separator); stroke-width: 1; }
+  .chart .axis { fill: var(--hint); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .chart .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .area { fill: var(--accent); opacity: .12; }
+  .chart .outage { fill: var(--danger); opacity: .18; }
+  .chart .cross { stroke: var(--hint); stroke-width: 1; }
+  .chart .marker { fill: var(--accent); stroke: var(--card); stroke-width: 2; }
+  .tip {
+    position: absolute; top: 4px; transform: translateX(-50%); pointer-events: none; white-space: nowrap;
+    background: var(--text); color: var(--card); font-size: 12px; padding: 4px 8px; border-radius: 6px;
+  }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 0.5px solid var(--separator); }
+  .stat { padding: 10px 4px; text-align: center; }
+  .stat + .stat { border-left: 0.5px solid var(--separator); }
+  .stat b { display: block; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--hint); font-size: 12px; }
+  .status-ranges { padding: 0 16px; }
+  .status-ranges .segmented { margin: 10px 0 0; }
+  .empty-chart { height: 150px; display: grid; place-items: center; color: var(--hint); font-size: 14px; text-align: center; padding: 0 20px; }
+
+  /* Toast */
+  .toast {
+    position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translate(-50%, 20px);
+    background: rgba(30, 30, 30, .92); color: #fff; padding: 10px 16px; border-radius: 10px; font-size: 14px;
+    opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; z-index: 10;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<button class="primary hidden" id="primary"></button>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- Telegram environment ----------
+  // Launch data arrives in the URL fragment; the JS SDK only adds native niceties.
+  const launch = new URLSearchParams(location.hash.slice(1));
+  // Outside Telegram the SDK still defines WebApp, but with empty initData and an invisible MainButton.
+  const wa = () => (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData) ? window.Telegram.WebApp : null;
+  const initData = () => (wa() && wa().initData) || launch.get("tgWebAppData") || "";
+  const platform = () => (wa() && wa().platform) || launch.get("tgWebAppPlatform") || "unknown";
+
+  const THEME_VARS = {
+    bg_color: "--tg-bg", secondary_bg_color: "--tg-secondary-bg", section_bg_color: "--tg-section-bg",
+    text_color: "--tg-text", hint_color: "--tg-hint", link_color: "--tg-link", accent_text_color: "--tg-accent",
+    button_color: "--tg-button", button_text_color: "--tg-button-text", destructive_text_color: "--tg-destructive",
+    section_header_text_color: "--tg-section-header", section_separator_color: "--tg-separator",
+  };
+
+  function applyTheme(theme) {
+    let any = false;
+    for (const [key, cssVar] of Object.entries(THEME_VARS)) {
+      if (theme && theme[key]) { document.documentElement.style.setProperty(cssVar, theme[key]); any = true; }
+    }
+    if (any) document.documentElement.dataset.tgTheme = "1";
+  }
+  try { applyTheme(JSON.parse(launch.get("tgWebAppThemeParams") || "{}")); } catch (_) {}
+
+  // ---------- Links ----------
+  const APPS = {
+    ios: { label: "iPhone", app: "Happ", store: [
+      ["App Store", "https://apps.apple.com/ru/app/happ-proxy-utility/id6783623643"],
+      ["App Store (не РФ)", "https://apps.apple.com/us/app/happ-proxy-utility/id6504287215"] ] },
+    android: { label: "Android", app: "Happ", store: [
+      ["Google Play", "https://play.google.com/store/apps/details?id=com.happproxy"],
+      ["Скачать APK", "https://github.com/Happ-proxy/happ-android/releases/latest/download/Happ.apk"] ] },
+    windows: { label: "Windows", app: "Happ", store: [
+      ["Скачать для Windows", "https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe"] ] },
+    mac: { label: "Mac", app: "Happ", store: [
+      ["App Store", "https://apps.apple.com/ru/app/happ-proxy-utility/id6783623643"],
+      ["Скачать .dmg", "https://github.com/Happ-proxy/happ-desktop/releases/latest/download/Happ.macOS.universal.dmg"] ] },
+  };
+  const detectedPlatform = () => ({ ios: "ios", android: "android", android_x: "android", macos: "mac", tdesktop: "windows" }[platform()] || (/Mac/.test(navigator.platform) ? "mac" : /Win/.test(navigator.platform) ? "windows" : /Android/i.test(navigator.userAgent) ? "android" : "ios"));
+
+  // ---------- Icons ----------
+  const ICON = {
+    shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>',
+    alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg>',
+    link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg>',
+    bolt: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg>',
+    devices: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="2"/><rect x="15" y="8" width="7" height="12" rx="1.5"/><path d="M6 18h6"/></svg>',
+    open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
+  };
+
+  // ---------- Helpers ----------
+  const app = document.getElementById("app");
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const $ = (sel) => app.querySelector(sel);
+  let pollTimer = null;
+
+  function render(html) {
+    clearTimeout(pollTimer);
+    app.innerHTML = html;
+    window.scrollTo(0, 0);
+  }
+
+  function haptic(kind) {
+    try { kind === "tap" ? wa().HapticFeedback.impactOccurred("light") : wa().HapticFeedback.notificationOccurred(kind); } catch (_) {}
+  }
+
+  let toastTimer;
+  function toast(text) {
+    const el = document.getElementById("toast");
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
+  }
+
+  function openLink(url) {
+    if (wa() && /^https?:/.test(url)) wa().openLink(url); else location.href = url;
+  }
+
+  // Primary action: Telegram's native bottom button when available, an in-page button otherwise.
+  let primary = null;
+  function setPrimary(text, onClick, opts = {}) {
+    primary = text ? { text, onClick, secondary: !!opts.secondary } : null;
+    syncPrimary();
+  }
+  function syncPrimary() {
+    const fallback = document.getElementById("primary");
+    const main = wa() && wa().MainButton;
+    if (main) {
+      fallback.classList.add("hidden");
+      main.offClick(onMainClick);
+      if (primary) {
+        main.setParams({ text: primary.text, is_visible: true, is_active: true });
+        main.onClick(onMainClick);
+      } else {
+        main.hide();
+      }
+      return;
+    }
+    fallback.classList.toggle("hidden", !primary);
+    if (primary) {
+      fallback.textContent = primary.text;
+      fallback.classList.toggle("secondary", primary.secondary);
+      fallback.disabled = false;
+      fallback.onclick = onMainClick;
+    }
+  }
+  async function onMainClick() {
+    if (!primary) return;
+    haptic("tap");
+    const main = wa() && wa().MainButton;
+    const fallback = document.getElementById("primary");
+    main ? main.showProgress(false) : (fallback.disabled = true);
+    try { await primary.onClick(); } finally {
+      if (main) main.hideProgress(); else fallback.disabled = false;
+    }
+  }
+
+  async function api(path, extra = {}) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ init_data: initData(), ...extra }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || "Сервер недоступен. Попробуй позже.");
+    return body;
+  }
+
+  // ---------- Screens ----------
+  function hero(icon, cls, title, text, pill) {
+    return `<div class="hero">
+      <div class="hero-icon ${cls}">${ICON[icon]}</div>
+      <h1>${title}</h1>
+      ${text ? `<p>${text}</p>` : ""}
+      ${pill || ""}
+    </div>`;
+  }
+
+  function showLoading() {
+    setPrimary(null);
+    render(`<div class="hero">
+      <div class="sk" style="width:76px;height:76px;border-radius:50%;margin:0 auto 14px"></div>
+      <div class="sk" style="width:60%;height:24px;margin:0 auto 10px"></div>
+      <div class="sk" style="width:80%;height:15px;margin:0 auto"></div></div>
+      <div class="section"><div class="sk" style="height:140px;border-radius:12px"></div></div>`);
+  }
+
+  async function load(path = "/api/state", { quiet = false } = {}) {
+    if (!quiet) showLoading();
+    try {
+      show(await api(path));
+    } catch (err) {
+      if (quiet) return;
+      render(hero("alert", "muted", "Не получилось", esc(err.message)));
+      setPrimary("Попробовать ещё раз", () => load());
+    }
+  }
+
+  function show(state) {
+    const name = state.name ? `, ${esc(state.name)}` : "";
+    ({ active: showActive, pending: showPending, no_username: showNoUsername }[state.status] || showNone)(state, name);
+  }
+
+  function showNone(_state, name) {
+    render(`${hero("shield", "", `Привет${name}!`, "Здесь можно получить доступ к VPN. Заявку одобряет админ — подписка придёт сюда и в чат с ботом.")}
+      <div class="section"><div class="card">
+        ${row(ICON.bolt, "Быстро и без рекламы", "Стабильная скорость, без лимитов")}
+        ${row(ICON.shield, "Обходит блокировки", "Есть профиль на случай белых списков")}
+        ${row(ICON.devices, "Телефон и компьютер", "iPhone, Android, Windows и Mac")}
+      </div></div>`);
+    setPrimary("Запросить доступ", async () => {
+      await load("/api/request", { quiet: false });
+      haptic("success");
+    });
+  }
+
+  function showPending(state, name) {
+    render(`${hero("clock", "wait", `Заявка отправлена${name}`, "Админ посмотрит её в ближайшее время. Эта страница обновится сама, а бот пришлёт подписку в чат.",
+        `<span class="pill wait">Заявка #${esc(state.request_id)}</span>`)}
+      <div class="section"><div class="card timeline">
+        ${step("done", "✓", "Заявка отправлена", "")}
+        ${step("now", "2", "Админ рассматривает", "Обычно в течение нескольких дней")}
+        ${step("todo", "3", "Подписка готова", "Ссылка появится здесь и в чате")}
+      </div></div>`);
+    setPrimary("Проверить статус", () => load(), { secondary: true });
+    const poll = () => { pollTimer = setTimeout(async () => { await load("/api/state", { quiet: true }); }, 15000); };
+    poll();
+  }
+
+  function showNoUsername(_state, name) {
+    render(`${hero("user", "muted", `Нужен username${name}`, "Подписка привязывается к имени пользователя в Telegram, а у тебя его пока нет.")}
+      <div class="section"><div class="section-title">Как завести</div><div class="card">
+        ${step("", "1", "Открой настройки Telegram", "")}
+        ${step("", "2", "Нажми «Имя пользователя»", "В iOS — в разделе «Мой профиль»")}
+        ${step("", "3", "Придумай любое и сохрани", "")}
+      </div></div>`);
+    setPrimary("Я установил, проверить", () => load());
+  }
+
+  function showActive(state, name) {
+    const url = state.subscription_url;
+    let current = detectedPlatform();
+
+    render(`${hero("check", "ok", `Всё готово${name}`, "Подписка активна. Добавь её в приложение — это займёт минуту.", '<span class="pill">Активна</span>')}
+
+      <div class="section">
+        <div class="section-title">Твоя подписка</div>
+        <div class="card">
+          <button class="row" id="copy-row">
+            <div class="row-icon">${ICON.link}</div>
+            <div class="row-body"><div class="row-title">Ссылка на подписку</div><div class="row-sub mono">${esc(url.replace(/^https:\/\//, ""))}</div></div>
+            <div class="row-action">Копировать</div>
+          </button>
+          <a class="row link" href="happ://add/${esc(url)}" id="happ">
+            <div class="row-icon">${ICON.open}</div>
+            <div class="row-body"><div class="row-title">Открыть в Happ</div><div class="row-sub">Добавит подписку одним нажатием</div></div>
+          </a>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Как подключиться</div>
+        <div class="segmented" role="group" id="platforms">
+          ${Object.entries(APPS).map(([key, p]) => `<button data-p="${key}" aria-pressed="${key === current}">${p.label}</button>`).join("")}
+        </div>
+        <div class="card" id="steps"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Профили в подписке</div>
+        <div class="card">
+          ${row("🇳🇱", "Основной", "Используй по умолчанию", "flag")}
+          ${row("🇷🇺", "Белые списки", "Когда на мобильном работают только VK и Яндекс", "flag")}
+        </div>
+      </div>
+
+      <div class="section">
+        <details id="vpn-status-details">
+          <summary><span class="dot" id="vpn-dot"></span><span>Статус VPN</span><span class="summary-meta" id="vpn-meta">проверяем…</span></summary>
+          <div class="status-body" id="vpn-status"></div>
+        </details>
+        <details>
+          <summary>Не работает?</summary>
+          <div class="details-body"><ol>
+            <li>Обнови подписку в приложении (в Happ — потяни список вниз).</li>
+            <li>Переключись на другой профиль.</li>
+            <li>Выключи и включи VPN, перезапусти приложение.</li>
+            <li>Не помогло — напиши админу в чате с ботом.</li>
+          </ol></div>
+        </details>
+        <details>
+          <summary>QR-код для другого устройства</summary>
+          <div class="details-body">
+            <img class="qr" alt="QR-код подписки" src="data:image/png;base64,${state.qr_png_base64}">
+            <p class="section-note" style="text-align:center;margin:0">Отсканируй в приложении: «+» → «QR-код»</p>
+          </div>
+        </details>
+      </div>`);
+
+    const copy = async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch (_) {
+        const ta = document.createElement("textarea");
+        ta.value = url; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+      }
+      haptic("success");
+      toast("Ссылка скопирована");
+    };
+
+    const renderSteps = () => {
+      const p = APPS[current];
+      $("#steps").innerHTML = `
+        ${step("", "1", `Установи ${p.app}`, "", p.store.map(([label, href]) => `<a class="chip" href="${esc(href)}" data-ext>${esc(label)}</a>`).join(""))}
+        ${step("", "2", "Добавь подписку", "Нажми «Открыть в Happ» или скопируй ссылку и в приложении выбери «+» → «Из буфера обмена»")}
+        ${step("", "3", "Подключись", "Выбери профиль 🇳🇱 «Основной» и нажми кнопку включения")}`;
+      app.querySelectorAll("[data-ext]").forEach((a) => a.onclick = (e) => { e.preventDefault(); openLink(a.href); });
+    };
+
+    $("#platforms").onclick = (e) => {
+      const btn = e.target.closest("button[data-p]");
+      if (!btn) return;
+      current = btn.dataset.p;
+      app.querySelectorAll("#platforms button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+      haptic("tap");
+      renderSteps();
+    };
+    $("#copy-row").onclick = copy;
+    // Telegram's in-app browser on phones blocks happ:// links; hop through the system browser.
+    $("#happ").onclick = (e) => {
+      if (!wa() || !["ios", "android", "android_x"].includes(platform())) return;
+      e.preventDefault();
+      haptic("tap");
+      wa().openLink(`${location.origin}/open-in-app?url=${encodeURIComponent(url)}`);
+    };
+    renderSteps();
+    setPrimary("Скопировать ссылку", copy);
+    loadStatusSummary();
+    const details = document.getElementById("vpn-status-details");
+    details.addEventListener("toggle", () => {
+      if (details.open && !details.dataset.loaded) {
+        details.dataset.loaded = "1";
+        loadStatus(document.getElementById("vpn-status"), "24h");
+      }
+    });
+  }
+
+  // ---------- VPN status & latency chart ----------
+  const RANGES = [["1h", "Час"], ["24h", "Сутки"], ["7d", "Неделя"]];
+  const fmtMs = (v) => v == null ? "—" : (v >= 100 ? Math.round(v) : v.toFixed(v < 10 ? 1 : 0));
+  const pad = (n) => String(n).padStart(2, "0");
+  const fmtTime = (t, range) => {
+    const d = new Date(t * 1000);
+    return range === "7d" ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)}` : `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const fmtAgo = (t) => {
+    const min = Math.max(0, Math.round((Date.now() / 1000 - t) / 60));
+    return min < 1 ? "только что" : min < 60 ? `${min} мин назад` : `${Math.round(min / 60)} ч назад`;
+  };
+
+  const VPN_STATE = {
+    ok: ["ok", "VPN работает"],
+    degraded: ["bad", "Есть проблемы — пробуем починить"],
+    unknown: ["", "Проверка ещё не проводилась"],
+  };
+
+  // Collapsed row: colored dot + current ping; the full block loads when opened.
+  async function loadStatusSummary() {
+    const dot = document.getElementById("vpn-dot"), meta = document.getElementById("vpn-meta");
+    try {
+      const data = await api("/api/status", { range: "1h" });
+      const [cls, text] = VPN_STATE[data.vpn] || ["", "Неизвестно"];
+      dot.className = `dot ${cls}`;
+      meta.textContent = data.latency.current_ms != null ? `${fmtMs(data.latency.current_ms)} мс` : text;
+      dot.title = text;
+    } catch (_) {
+      meta.textContent = "недоступен";
+    }
+  }
+
+  async function loadStatus(box, range) {
+    if (!box || !box.isConnected) return;
+    let data;
+    try {
+      data = await api("/api/status", { range });
+    } catch (err) {
+      box.innerHTML = `<div class="empty-chart">${esc(err.message)}</div>`;
+      return;
+    }
+    const lat = data.latency;
+    const vpn = VPN_STATE[data.vpn] || ["", "Неизвестно"];
+
+    box.innerHTML = `
+      <div class="status-head">
+        <div class="dot ${vpn[0]}"></div>
+        <div class="status-text">${vpn[1]}</div>
+        ${data.checked_at ? `<div class="status-time">${fmtAgo(data.checked_at)}</div>` : ""}
+      </div>
+      <div class="ping"><span class="ping-value">${fmtMs(lat.current_ms)}</span><span class="ping-unit">мс</span></div>
+      <div class="ping-label">Пинг между входом в России и сервером в Нидерландах</div>
+      <div class="status-ranges"><div class="segmented" role="group">
+        ${RANGES.map(([key, label]) => `<button data-r="${key}" aria-pressed="${key === range}">${label}</button>`).join("")}
+      </div></div>
+      <div class="chart-wrap"></div>
+      <div class="stats">
+        <div class="stat"><b>${fmtMs(lat.min_ms)}</b><span>мин, мс</span></div>
+        <div class="stat"><b>${fmtMs(lat.avg_ms)}</b><span>средний</span></div>
+        <div class="stat"><b>${fmtMs(lat.max_ms)}</b><span>макс</span></div>
+        <div class="stat"><b>${lat.loss_pct}%</b><span>потери</span></div>
+      </div>`;
+
+    box.querySelector(".segmented").onclick = (e) => {
+      const btn = e.target.closest("button[data-r]");
+      if (!btn || btn.dataset.r === range) return;
+      haptic("tap");
+      box.querySelectorAll(".segmented button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+      loadStatus(box, btn.dataset.r);
+    };
+    drawChart(box.querySelector(".chart-wrap"), lat, range);
+  }
+
+  function drawChart(wrap, lat, range) {
+    const pts = lat.points;
+    if (!pts.length) {
+      wrap.innerHTML = `<div class="empty-chart">Данных пока нет — замеры идут раз в минуту.</div>`;
+      return;
+    }
+    const W = Math.max(260, wrap.clientWidth - 16), H = 150;
+    const M = { l: 30, r: 6, t: 10, b: 20 };
+    const iw = W - M.l - M.r, ih = H - M.t - M.b;
+    const now = Date.now() / 1000;
+    const span = { "1h": 3600, "24h": 86400, "7d": 604800 }[range];
+    const t0 = now - span;
+    const values = pts.map((p) => p.ms).filter((v) => v != null);
+    const niceMax = (() => {
+      const raw = Math.max(10, ...values) * 1.15;
+      const step = Math.pow(10, Math.floor(Math.log10(raw)));
+      return Math.ceil(raw / step) * step;
+    })();
+    const x = (t) => M.l + ((t - t0) / span) * iw;
+    const y = (v) => M.t + ih - (v / niceMax) * ih;
+    const bucketW = Math.max(1.5, (lat.bucket_secs / span) * iw);
+
+    // Break the line at outages and at gaps longer than 1.5 buckets (no samples, e.g. restarts).
+    let line = "", area = "", seg = [];
+    const flushSeg = () => {
+      if (seg.length) {
+        line += "M" + seg.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join("L");
+        area += `M${seg[0][0].toFixed(1)},${(M.t + ih).toFixed(1)}L` + seg.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join("L") + `L${seg[seg.length - 1][0].toFixed(1)},${(M.t + ih).toFixed(1)}Z`;
+      }
+      seg = [];
+    };
+    let prevT = null;
+    for (const p of pts) {
+      if (p.ms == null || (prevT != null && p.t - prevT > lat.bucket_secs * 1.5)) flushSeg();
+      if (p.ms != null) seg.push([x(p.t + lat.bucket_secs / 2), y(p.ms)]);
+      prevT = p.t;
+    }
+    flushSeg();
+
+    const outages = pts.filter((p) => p.ms == null)
+      .map((p) => `<rect class="outage" x="${x(p.t).toFixed(1)}" y="${M.t}" width="${bucketW.toFixed(1)}" height="${ih}"/>`).join("");
+    const grid = [0, niceMax / 2, niceMax].map((v) =>
+      `<line class="grid" x1="${M.l}" x2="${W - M.r}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>
+       <text class="axis" x="${M.l - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end">${Math.round(v)}</text>`).join("");
+    const xticks = [0, 1 / 3, 2 / 3, 1].map((f) => {
+      const t = t0 + f * span;
+      const anchor = f === 0 ? "start" : f === 1 ? "end" : "middle";
+      return `<text class="axis" x="${x(t).toFixed(1)}" y="${H - 5}" text-anchor="${anchor}">${f === 1 ? "сейчас" : fmtTime(t, range)}</text>`;
+    }).join("");
+
+    const summary = `Пинг за период: минимум ${fmtMs(lat.min_ms)} мс, в среднем ${fmtMs(lat.avg_ms)} мс, максимум ${fmtMs(lat.max_ms)} мс, потери ${lat.loss_pct}%`;
+    wrap.innerHTML = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(summary)}">
+        ${grid}${outages}<path class="area" d="${area}"/><path class="line" d="${line}"/>${xticks}
+        <line class="cross hidden" y1="${M.t}" y2="${M.t + ih}"/><circle class="marker hidden" r="4"/>
+      </svg><div class="tip hidden"></div>`;
+
+    // Crosshair + tooltip on hover / touch: nearest bucket to the pointer.
+    const svg = wrap.querySelector("svg"), cross = svg.querySelector(".cross"), marker = svg.querySelector(".marker"), tip = wrap.querySelector(".tip");
+    const hide = () => [cross, marker, tip].forEach((el) => el.classList.add("hidden"));
+    const move = (e) => {
+      const r = svg.getBoundingClientRect();
+      const sx = ((e.clientX - r.left) / r.width) * W;
+      if (sx < M.l || sx > W - M.r) return hide();
+      const t = t0 + ((sx - M.l) / iw) * span;
+      let best = null;
+      for (const p of pts) if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
+      if (!best || Math.abs(best.t - t) > lat.bucket_secs * 2) return hide();
+      const px = x(best.t + lat.bucket_secs / 2);
+      cross.setAttribute("x1", px); cross.setAttribute("x2", px); cross.classList.remove("hidden");
+      if (best.ms != null) { marker.setAttribute("cx", px); marker.setAttribute("cy", y(best.ms)); marker.classList.remove("hidden"); }
+      else marker.classList.add("hidden");
+      tip.textContent = `${fmtTime(best.t, range === "7d" ? "24h" : range)}${range === "7d" ? " " + fmtTime(best.t, "7d") : ""} · ${best.ms == null ? "нет связи" : fmtMs(best.ms) + " мс"}`;
+      tip.style.left = `${Math.min(Math.max((px / W) * 100, 18), 82)}%`;
+      tip.classList.remove("hidden");
+    };
+    svg.addEventListener("pointermove", move);
+    svg.addEventListener("pointerdown", move);
+    svg.addEventListener("pointerleave", hide);
+  }
+
+  function row(icon, title, sub, cls = "") {
+    return `<div class="row"><div class="row-icon ${cls}">${icon}</div>
+      <div class="row-body"><div class="row-title">${title}</div>${sub ? `<div class="row-sub">${sub}</div>` : ""}</div></div>`;
+  }
+
+  function step(state, num, title, sub, actions = "") {
+    return `<div class="step"><div class="step-num ${state}">${num}</div>
+      <div class="step-body"><div class="row-title">${title}</div>${sub ? `<div class="row-sub">${sub}</div>` : ""}
+      ${actions ? `<div class="step-actions">${actions}</div>` : ""}</div></div>`;
+  }
+
+  // ---------- Boot ----------
+  function onSdkReady() {
+    const w = wa();
+    if (!w) return;
+    w.ready();
+    w.expand();
+    applyTheme(w.themeParams);
+    try { w.setHeaderColor("secondary_bg_color"); w.setBackgroundColor("secondary_bg_color"); } catch (_) {}
+    w.onEvent("themeChanged", () => applyTheme(w.themeParams));
+    syncPrimary();
+  }
+  window.addEventListener("load", onSdkReady);
+
+  if (!initData()) {
+    render(hero("alert", "muted", "Открой из Telegram", "Эта страница работает только внутри бота. Открой бота и нажми кнопку «VPN» внизу."));
+  } else {
+    load();
+  }
+})();
+</script>
+</body>
+</html>

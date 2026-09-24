@@ -1,75 +1,59 @@
+mod access;
+mod bot;
 mod config;
-mod handlers;
+mod health;
+mod latency;
+mod panel;
 mod qr;
 mod state;
 mod storage;
-mod xui;
+mod web;
 
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
+use teloxide::prelude::*;
+
 use crate::config::AppConfig;
 use crate::state::AppState;
-use anyhow::{Context, Result};
-use teloxide::dispatching::UpdateFilterExt;
-use teloxide::dptree;
-use teloxide::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     pretty_env_logger::init();
-    log::info!("starting vpn_bot");
 
     let config = AppConfig::from_env().context("failed to load configuration")?;
     log::info!(
-        "configuration loaded: inbound_id={}, sqlite_path={}",
-        config.xui_inbound_id,
-        config.sqlite_path
+        "starting vpn_bot: panel={} inbounds={:?} health={} mini_app={}",
+        config.panel.base_url,
+        config.panel.inbound_ids,
+        config.health.is_some(),
+        config.web.as_ref().map_or("off", |w| w.public_url.as_str())
     );
-    let state = Arc::new(AppState::new(config).context("failed to initialize app state")?);
-    log::info!("app state initialized");
+    let state = Arc::new(AppState::new(config)?);
     let bot = Bot::from_env();
-    log::info!("telegram bot initialized, entering dispatcher loop");
 
-    let handler = dptree::entry()
-        .branch(Update::filter_message().endpoint(handle_message))
-        .branch(Update::filter_callback_query().endpoint(handle_callback));
+    if let Err(err) = bot::register_commands(&bot, &state).await {
+        log::warn!("failed to register bot commands: {err:#}");
+    }
+    if let Some(health) = state.config.health.clone() {
+        tokio::spawn(latency::sampler(state.clone(), health.relay_addr));
+        tokio::spawn(health::monitor(bot.clone(), state.clone(), health));
+    }
+    if state.config.web.is_some() {
+        let (state, bot) = (state.clone(), bot.clone());
+        tokio::spawn(async move {
+            if let Err(err) = web::serve(state, bot).await {
+                log::error!("mini app server failed: {err:#}");
+            }
+        });
+    }
 
-    Dispatcher::builder(bot, handler)
+    Dispatcher::builder(bot, bot::schema())
         .dependencies(dptree::deps![state])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
         .await;
-
     Ok(())
-}
-
-async fn handle_message(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
-    if let Some(text) = msg.text().map(str::to_owned) {
-        log_handler_error(
-            "handler",
-            handlers::handle_text(bot, msg, &text, state).await,
-        );
-    } else {
-        log_handler_error(
-            "non-text handler",
-            handlers::handle_non_text(bot, msg, state).await,
-        );
-    }
-    Ok(())
-}
-
-async fn handle_callback(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -> Result<()> {
-    log_handler_error(
-        "callback handler",
-        handlers::handle_callback(bot, q, state).await,
-    );
-    Ok(())
-}
-
-fn log_handler_error(scope: &str, result: Result<()>) {
-    if let Err(err) = result {
-        log::error!("{scope} error: {err:#}");
-    }
 }

@@ -103,7 +103,10 @@ if grep -q '^SQLITE_PATH=' "$INSTALL_DIR/.env"; then
   if [[ "$SQLITE_PATH" != /* ]]; then
     SQLITE_PATH="$INSTALL_DIR/$SQLITE_PATH"
   fi
-  sudo install -m 0640 -o "$SERVICE_USER" -g "$SERVICE_GROUP" /dev/null "$SQLITE_PATH" || true
+  # Create the DB only once: `install /dev/null` over an existing file would wipe pending requests.
+  if [[ ! -e "$SQLITE_PATH" ]]; then
+    sudo install -m 0640 -o "$SERVICE_USER" -g "$SERVICE_GROUP" /dev/null "$SQLITE_PATH" || true
+  fi
 fi
 
 echo "[6/7] Installing systemd service"

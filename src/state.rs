@@ -1,62 +1,57 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use teloxide::types::ChatId;
 
 use crate::config::AppConfig;
-use crate::storage::{InsertPendingResult, SqliteStore, StoredPendingRequest};
+use crate::health::HealthSnapshot;
+use crate::panel::Panel;
+use crate::storage::Store;
 
 pub struct AppState {
     pub config: AppConfig,
-    store: Arc<SqliteStore>,
-    meme_mode_users: Mutex<HashSet<u64>>,
+    pub panel: Panel,
+    pub store: Store,
+    /// Users who ran /meme and whose next media message goes to the admins.
+    meme_armed: Mutex<HashSet<u64>>,
+    /// Latest health check results, `None` until the first run.
+    health: Mutex<Option<HealthSnapshot>>,
 }
 
 impl AppState {
     pub fn new(config: AppConfig) -> Result<Self> {
-        let store = SqliteStore::new(&config.sqlite_path)?;
         Ok(Self {
+            panel: Panel::new(config.panel.clone())?,
+            store: Store::open(&config.sqlite_path)?,
             config,
-            store: Arc::new(store),
-            meme_mode_users: Mutex::new(HashSet::new()),
+            meme_armed: Mutex::new(HashSet::new()),
+            health: Mutex::new(None),
         })
     }
 
-    pub fn create_request(&self, request: PendingCreateRequest) -> Result<InsertPendingResult> {
-        self.store.insert_request(&request)
-    }
-
-    pub fn take_request(&self, request_id: u64) -> Result<Option<PendingCreateRequest>> {
-        self.store.take_request(request_id)
-    }
-
-    pub fn list_requests(&self) -> Result<Vec<StoredPendingRequest>> {
-        self.store.list_requests()
-    }
-
-    pub fn arm_meme_mode(&self, user_id: u64) -> Result<()> {
-        let mut users = self
-            .meme_mode_users
+    pub fn arm_meme(&self, user_id: u64) {
+        self.meme_armed
             .lock()
-            .map_err(|_| anyhow::anyhow!("meme mode mutex poisoned"))?;
-        users.insert(user_id);
-        Ok(())
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(user_id);
     }
 
-    pub fn consume_meme_mode(&self, user_id: u64) -> Result<bool> {
-        let mut users = self
-            .meme_mode_users
+    /// Returns true (once) if the user armed meme mode.
+    pub fn take_meme(&self, user_id: u64) -> bool {
+        self.meme_armed
             .lock()
-            .map_err(|_| anyhow::anyhow!("meme mode mutex poisoned"))?;
-        Ok(users.remove(&user_id))
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&user_id)
     }
-}
 
-#[derive(Clone, Debug)]
-pub struct PendingCreateRequest {
-    pub requester_chat_id: ChatId,
-    pub requester_user_id: u64,
-    pub custom_email: Option<String>,
+    pub fn set_health(&self, snapshot: HealthSnapshot) {
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
+    }
+
+    pub fn health(&self) -> Option<HealthSnapshot> {
+        self.health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
