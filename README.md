@@ -1,82 +1,68 @@
 # vpn_bot
 
-Rust Telegram bot that creates VPN users in 3X-UI.
+Rust Telegram bot that hands out VPN subscriptions from a 3X-UI 3.x panel.
 
 ## Features
 
-- Non-admin commands:
-  - `/vpn` requests VPN access (or returns existing access immediately)
-  - `/meme` arms meme sending flow; next meme is forwarded to admin (may speed up review)
-- Existing config check by Telegram username before creating a pending request
-- `/approve <id>` and `/deny <id>` commands for manual approval
-- Admin command `/subs` shows all existing subscriptions
-- Admin command `/requests` shows all pending access requests
-- Admin command `/delete <login>` deletes a subscription by login
-- Admin command `/broadcast <text>` sends a message to all users with non-empty `tgId`
-- Admin command `/msg <@login|tg_id> <text>` sends a message to one user
-- Approval messages for admins include inline `Approve` / `Deny` buttons
-- After approval, bot sends connection URL and QR code to requester
-- Optional Telegram user allowlist with `ALLOW_USER_IDS`
-- Required approver allowlist with `APPROVER_USER_IDS`
-- Configurable limits (`XUI_TOTAL_GB`)
-- Pending requests are stored in SQLite and survive restarts
+Users:
+- `/vpn` — returns the existing subscription, or files an access request for approvers
+- `/guide` — how to connect, which profile to use, what to do when it stops working
+- `/meme` — the next sticker/photo/gif/video is forwarded to approvers
+- Buttons under the subscription message: «📖 Инструкция» and «🔄 Получить ссылку заново»
 
-## Setup
+Approvers (`APPROVER_USER_IDS`):
+- New requests arrive with «Одобрить» / «Отклонить» buttons; `/approve <id>`, `/deny <id>`, `/requests`
+- `/subs` — all clients with their inbounds; `/delete <login>`
+- `/broadcast <text>`, `/msg <@login|tg_id> <text>`
+- `/status` — relay chain checks, exit server load, online clients and traffic
+- Handler errors are reported to approvers in chat; users get a generic message
 
-1. Copy `.env.example` to `.env` and fill values.
-2. Run the bot:
+Telegram Mini App (optional, `WEB_PUBLIC_URL`): a «VPN» menu button opens a page inside the bot where users request access, see the request status, copy their subscription (or open it in Happ), scan a QR and read platform-specific instructions. Requests are authenticated with Telegram's signed `initData`, so no logins are needed.
+
+Background health monitor (optional): probes every Reality profile through the relay and alerts approvers when a check goes down and when it recovers.
+
+Clients are named after the Telegram username (the panel's `email` field) and attached to all `XUI_INBOUND_IDS` at once, so a single subscription carries every profile. Pending requests live in SQLite and survive restarts.
+
+## Configuration
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `TELOXIDE_TOKEN` | yes | bot token from BotFather |
+| `APPROVER_USER_IDS` | yes | comma-separated Telegram user ids of approvers |
+| `ALLOW_USER_IDS` | no | if set, only these users may request access |
+| `XUI_BASE_URL` | yes | panel root including the secret base path, e.g. `http://127.0.0.1:61563/<path>` |
+| `XUI_API_TOKEN` | one of | panel API token (sent as `Authorization: Bearer`) |
+| `XUI_USERNAME`, `XUI_PASSWORD` | one of | panel login; used when no API token is set |
+| `XUI_INBOUND_IDS` | yes | comma-separated inbound ids every new client is attached to |
+| `XUI_SUBSCRIPTION_BASE_URL` | yes | public subscription base, e.g. `https://sub.example.com:2096/sub/` |
+| `XUI_CLIENT_FLOW` | no | VLESS flow for new clients; empty (default) for XHTTP/gRPC, `xtls-rprx-vision` for raw TCP Reality |
+| `XUI_TOTAL_GB` | no | traffic limit per new client, 0 = unlimited |
+| `SQLITE_PATH` | no | default `vpn_bot.sqlite3` |
+| `WEB_PUBLIC_URL` | no | public HTTPS URL of the Mini App; unset disables it |
+| `WEB_LISTEN` | no | local bind address of the Mini App server, default `127.0.0.1:8080` (put a TLS proxy in front) |
+| `HEALTH_RELAY_ADDR` | no | relay `ip:port` clients connect to; unset disables health checks |
+| `HEALTH_SNIS` | no | Reality SNIs to probe through the relay, default `ign.com` |
+| `HEALTH_SUBSCRIPTION_URL` | no | subscription server URL to probe |
+| `HEALTH_INTERVAL_SECS` | no | default `300` |
+| `HEALTH_FAIL_THRESHOLD` | no | consecutive failures before an alert, default `2` |
+
+A profile is probed by resolving its SNI to the relay and making an HTTPS request: Reality passes an unauthenticated handshake through to the real site, so a valid response proves client → relay → exit works for that profile.
+
+## Run
 
 ```bash
+cp .env.example .env   # fill in values
 cargo run
 ```
 
-## Required environment variables
+## Deploy
 
-- `TELOXIDE_TOKEN`
-- `XUI_BASE_URL`
-- `XUI_USERNAME`
-- `XUI_PASSWORD`
-- `XUI_INSECURE_TLS` (optional, default: `false`; set to `true` only for temporary workarounds with invalid/expired certs)
-- `XUI_INBOUND_ID`
-- `APPROVER_USER_IDS`
-- `SQLITE_PATH` (optional, default: `vpn_bot.sqlite3`)
-
-## Notes
-
-- 3X-UI API endpoints differ by version/build. If `/vpn` fails, inspect your panel's Network tab and adjust:
-  - `XUI_LOGIN_PATH`
-  - `XUI_ADD_CLIENT_PATH`
-  - `XUI_DELETE_CLIENT_PATH`
-  - `XUI_GET_INBOUND_PATH`
-  - `XUI_LIST_INBOUNDS_PATH`
-- For 3X-UI `2.8.x` builds, delete endpoint is usually: `/panel/api/inbounds/{id}/delClient/{clientId}`.
-- If panel URL contains a secret prefix (example: `https://host:2053/<secret>/panel/inbounds`), set `XUI_BASE_URL` to `https://host:2053/<secret>` (without `/panel`).
-- Keep your panel behind firewall/VPN and do not expose admin UI publicly.
-- Approval flow:
-  - User sends `/vpn`
-  - If config for Telegram username already exists on host: bot sends URL + QR immediately
-  - If config does not exist: bot sends request ID to approver IDs
-  - Approver runs `/approve <id>` or `/deny <id>`
-  - On approve, requester receives URL and QR code
-
-## Deploy Script
-
-For systemd deployment on a Linux server, use:
+On a Linux server with Rust installed:
 
 ```bash
-./scripts/deploy.sh
-```
-
-Useful options:
-
-```bash
-./scripts/deploy.sh --service-name vpn-bot --install-dir /opt/vpn-bot --env-file .env
-./scripts/deploy.sh --no-build
-```
-
-After deploy:
-
-```bash
+./scripts/deploy.sh --env-file /path/to/.env
 systemctl status vpn-bot
 journalctl -u vpn-bot -f
 ```
+
+The script builds a release binary and installs it as the `vpn-bot` systemd service under `/opt/vpn-bot`. The SQLite database is created once and kept across deploys.
