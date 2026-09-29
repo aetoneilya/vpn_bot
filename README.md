@@ -8,6 +8,7 @@ Users:
 - `/vpn` — returns the existing subscription, or files an access request for approvers
 - `/guide` — how to connect, which profile to use, what to do when it stops working
 - `/meme` — the next sticker/photo/gif/video is forwarded to approvers
+- `/problem <text>` — report a problem without opening the Mini App
 - Buttons under the subscription message: «📖 Инструкция» and «🔄 Получить ссылку заново»
 
 Approvers (`APPROVER_USER_IDS`):
@@ -15,9 +16,10 @@ Approvers (`APPROVER_USER_IDS`):
 - `/subs` — all clients with their inbounds; `/delete <login>`
 - `/broadcast <text>`, `/msg <@login|tg_id> <text>`
 - `/status` — relay chain checks, exit server load, online clients and traffic
+- Complaints arrive as cards with «Ответить» / «Решено»; the reply goes to the user through the bot. `/complaints`, `/reply <id> <text>`, `/cancel`
 - Handler errors are reported to approvers in chat; users get a generic message
 
-Telegram Mini App (optional, `WEB_PUBLIC_URL`): a «VPN» menu button opens a page inside the bot where users request access, see the request status, copy their subscription (or open it in Happ), scan a QR and read platform-specific instructions. Requests are authenticated with Telegram's signed `initData`, so no logins are needed.
+Telegram Mini App (optional, `WEB_PUBLIC_URL`): a «VPN» menu button opens a page inside the bot where users request access, see the request status, copy their subscription (or open it in Happ), scan a QR and read platform-specific instructions. Requests are authenticated with Telegram's signed `initData`, so no logins are needed. The page also shows VPN status with a relay ↔ exit latency chart and a «Сообщить о проблеме» form: the complaint is enriched with the user's network operator and city (offline GeoIP lookup of the client IP; the raw IP is not stored), the device → relay ping and the platform.
 
 Background health monitor (optional): probes every Reality profile through the relay and alerts approvers when a check goes down and when it recovers.
 
@@ -40,6 +42,7 @@ Clients are named after the Telegram username (the panel's `email` field) and at
 | `SQLITE_PATH` | no | default `vpn_bot.sqlite3` |
 | `WEB_PUBLIC_URL` | no | public HTTPS URL of the Mini App; unset disables it |
 | `WEB_LISTEN` | no | local bind address of the Mini App server, default `127.0.0.1:8080` (put a TLS proxy in front) |
+| `GEOIP_CITY_DB`, `GEOIP_ASN_DB` | no | DB-IP Lite (MaxMind-format) city and ASN databases for complaint geolocation; set both or neither |
 | `HEALTH_RELAY_ADDR` | no | relay `ip:port` clients connect to; unset disables health checks |
 | `HEALTH_SNIS` | no | Reality SNIs to probe through the relay, default `ign.com` |
 | `HEALTH_SUBSCRIPTION_URL` | no | subscription server URL to probe |
@@ -64,5 +67,7 @@ On a Linux server with Rust installed:
 systemctl status vpn-bot
 journalctl -u vpn-bot -f
 ```
+
+The Mini App needs the real client IP in `X-Real-IP` for geolocation: behind a TCP relay, pass it with the PROXY protocol and let the TLS proxy set the header (nginx: `listen … proxy_protocol; real_ip_header proxy_protocol; proxy_set_header X-Real-IP $proxy_protocol_addr;`).
 
 The script builds a release binary and installs it as the `vpn-bot` systemd service under `/opt/vpn-bot`. The SQLite database is created once and kept across deploys.

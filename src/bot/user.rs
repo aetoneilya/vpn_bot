@@ -8,6 +8,7 @@ use teloxide::utils::command::BotCommands;
 use super::ui::{self, format_login};
 use super::{AdminCommand, UserCommand};
 use crate::access::{self, RequestOutcome};
+use crate::complaints::{self, Category, NewComplaint, SubmitOutcome};
 use crate::state::AppState;
 
 pub async fn handle(bot: &Bot, msg: &Message, cmd: UserCommand, state: &AppState) -> Result<()> {
@@ -25,7 +26,52 @@ pub async fn handle(bot: &Bot, msg: &Message, cmd: UserCommand, state: &AppState
             bot.send_message(msg.chat.id, ui::MEME_PROMPT).await?;
             Ok(())
         }
+        UserCommand::Problem(text) => report_problem(bot, msg.chat.id, user, &text, state).await,
     }
+}
+
+/// `/problem <text>`: a complaint without network context (the bot chat has no client IP).
+async fn report_problem(
+    bot: &Bot,
+    chat_id: ChatId,
+    user: &User,
+    text: &str,
+    state: &AppState,
+) -> Result<()> {
+    if !state.config.is_allowed(user.id.0) {
+        bot.send_message(chat_id, ui::ACCESS_DENIED).await?;
+        return Ok(());
+    }
+    if text.trim().is_empty() {
+        let mut message = bot.send_message(chat_id, ui::PROBLEM_HINT);
+        if let Some(keyboard) = ui::web_app_keyboard(state) {
+            message = message.reply_markup(keyboard);
+        }
+        message.await?;
+        return Ok(());
+    }
+
+    let complaint = NewComplaint {
+        user_id: user.id.0,
+        chat_id,
+        login: user.username.as_deref().map(crate::panel::normalize_login),
+        category: Category::Other,
+        profile: None,
+        network: None,
+        site: None,
+        comment: Some(text.to_string()),
+        platform: None,
+        client_rtt_ms: None,
+        geo: Default::default(),
+    };
+    let reply = match complaints::submit(bot, state, complaint).await? {
+        SubmitOutcome::Submitted(id) => {
+            format!("Жалоба #{id} отправлена админу. Ответ придёт сюда.")
+        }
+        SubmitOutcome::RateLimited => "Слишком много жалоб за час — попробуй позже.".to_string(),
+    };
+    bot.send_message(chat_id, reply).await?;
+    Ok(())
 }
 
 /// Anything that is not a known command: a meme after /meme, otherwise a hint.

@@ -13,6 +13,7 @@ hex = "0.4"
 hmac = "0.12"
 image = "0.25"
 log = "0.4"
+maxminddb = { version = "0.32.0", features = ["mmap"] }
 pretty_env_logger = "0.5"
 qrcode = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }

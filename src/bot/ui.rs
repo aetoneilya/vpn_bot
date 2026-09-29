@@ -22,6 +22,7 @@ pub const MEME_SENT: &str = "Мем будет обхихикан админом
 pub const MEME_LIKE: &str = "ваш мем прикольный и смешной 👍(лайк)";
 pub const MEME_DISLIKE: &str = "сожалеем, уровень прикола вашего мема неудовлетворительный📉🫤";
 pub const USER_ERROR: &str = "Что-то пошло не так. Попробуй позже.";
+pub const PROBLEM_HINT: &str = "Опиши проблему одним сообщением: /problem не открывается youtube на МТС.\n\nУдобнее через кнопку «VPN» → «Сообщить о проблеме»: там оператор и регион подставятся сами.";
 
 pub const GUIDE: &str = "📖 Как подключиться
 
@@ -54,6 +55,8 @@ pub enum Action {
     Deny(u64),
     MemeLike(i64),
     MemeDislike(i64),
+    ComplaintReply(u64),
+    ComplaintResolve(u64),
 }
 
 impl Action {
@@ -65,6 +68,8 @@ impl Action {
             Self::Deny(id) => format!("deny:{id}"),
             Self::MemeLike(chat) => format!("meme_like:{chat}"),
             Self::MemeDislike(chat) => format!("meme_dislike:{chat}"),
+            Self::ComplaintReply(id) => format!("c_reply:{id}"),
+            Self::ComplaintResolve(id) => format!("c_done:{id}"),
         }
     }
 
@@ -77,6 +82,8 @@ impl Action {
             "deny" => Self::Deny(arg.parse().ok()?),
             "meme_like" => Self::MemeLike(arg.parse().ok()?),
             "meme_dislike" => Self::MemeDislike(arg.parse().ok()?),
+            "c_reply" => Self::ComplaintReply(arg.parse().ok()?),
+            "c_done" => Self::ComplaintResolve(arg.parse().ok()?),
             _ => return None,
         })
     }
@@ -102,6 +109,13 @@ pub fn approval_keyboard(request_id: u64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new([[
         Action::Approve(request_id).button("✅ Одобрить"),
         Action::Deny(request_id).button("❌ Отклонить"),
+    ]])
+}
+
+pub fn complaint_keyboard(id: u64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([[
+        Action::ComplaintReply(id).button("💬 Ответить"),
+        Action::ComplaintResolve(id).button("✅ Решено"),
     ]])
 }
 
@@ -220,6 +234,8 @@ mod tests {
             Action::Deny(7),
             Action::MemeLike(-100123),
             Action::MemeDislike(5),
+            Action::ComplaintReply(3),
+            Action::ComplaintResolve(4),
         ] {
             assert_eq!(Action::decode(&action.encode()), Some(action));
         }

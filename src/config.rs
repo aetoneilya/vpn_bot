@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -13,6 +14,14 @@ pub struct AppConfig {
     pub approver_user_ids: HashSet<u64>,
     pub health: Option<HealthConfig>,
     pub web: Option<WebConfig>,
+    pub geo: Option<GeoConfig>,
+}
+
+/// DB-IP Lite (MaxMind format) databases; both paths must be set to enable GeoIP.
+#[derive(Clone, Debug)]
+pub struct GeoConfig {
+    pub city_db: PathBuf,
+    pub asn_db: PathBuf,
 }
 
 /// Telegram Mini App server; enabled when `WEB_PUBLIC_URL` is set.
@@ -71,6 +80,14 @@ impl AppConfig {
             approver_user_ids,
             health: HealthConfig::from_env()?,
             web: WebConfig::from_env()?,
+            geo: match (optional_env("GEOIP_CITY_DB"), optional_env("GEOIP_ASN_DB")) {
+                (Some(city), Some(asn)) => Some(GeoConfig {
+                    city_db: city.into(),
+                    asn_db: asn.into(),
+                }),
+                (None, None) => None,
+                _ => bail!("set both GEOIP_CITY_DB and GEOIP_ASN_DB, or neither"),
+            },
         })
     }
 

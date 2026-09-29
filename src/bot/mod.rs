@@ -28,6 +28,8 @@ pub enum UserCommand {
     Guide,
     #[command(description = "отправить мем админу")]
     Meme,
+    #[command(description = "сообщить о проблеме: /problem <что случилось>")]
+    Problem(String),
 }
 
 #[derive(BotCommands, Clone, Debug)]
@@ -49,6 +51,12 @@ pub enum AdminCommand {
     Broadcast(String),
     #[command(description = "сообщение пользователю: /msg <@login|tg_id> <текст>")]
     Msg(String),
+    #[command(description = "открытые жалобы")]
+    Complaints,
+    #[command(description = "ответить на жалобу: /reply <номер> <текст>")]
+    Reply(String),
+    #[command(description = "отменить начатый ответ на жалобу")]
+    Cancel,
 }
 
 pub fn schema() -> UpdateHandler<anyhow::Error> {
@@ -144,8 +152,13 @@ async fn on_user_command(
 }
 
 async fn on_other_message(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<()> {
-    let result = user::handle_other(&bot, &msg, &state).await;
-    report(&bot, msg.chat.id, false, result).await
+    let is_admin = sender_id(&msg).is_some_and(|id| state.config.is_approver(id));
+    let result = if is_admin {
+        admin::handle_text(&bot, &msg, &state).await.map(|_| ())
+    } else {
+        user::handle_other(&bot, &msg, &state).await
+    };
+    report(&bot, msg.chat.id, is_admin, result).await
 }
 
 async fn on_callback(bot: Bot, query: CallbackQuery, state: Arc<AppState>) -> Result<()> {
