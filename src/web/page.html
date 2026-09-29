@@ -174,6 +174,20 @@
   .status-ranges .segmented { margin: 10px 0 0; }
   .empty-chart { height: 150px; display: grid; place-items: center; color: var(--hint); font-size: 14px; text-align: center; padding: 0 20px; }
 
+  /* Complaint form */
+  .row.choice { cursor: pointer; }
+  .row.choice .check { margin-left: auto; color: var(--accent); font-weight: 700; visibility: hidden; }
+  .row.choice[aria-checked="true"] .check { visibility: visible; }
+  .row-icon.danger { background: var(--danger); }
+  .field { display: block; width: 100%; border: 0; outline: 0; background: transparent; color: var(--text);
+    font: inherit; padding: 12px 16px; resize: vertical; }
+  .field::placeholder { color: var(--hint); }
+  textarea.field { min-height: 88px; }
+  .segmented.in-form { margin: 0; }
+  .form-group + .form-group { margin-top: 10px; }
+  .form-label { font-size: 13px; color: var(--hint); margin: 0 4px 6px; }
+  .back { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 16px; padding: 4px 0 0; }
+
   /* Toast */
   .toast {
     position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translate(-50%, 20px);
@@ -351,12 +365,17 @@
       show(await api(path));
     } catch (err) {
       if (quiet) return;
-      render(hero("alert", "muted", "Не получилось", esc(err.message)));
+      render(`${hero("alert", "muted", "Не получилось", esc(err.message))}
+        <div class="section"><div class="card">${reportRow()}</div></div>`);
+      bindReportRow();
       setPrimary("Попробовать ещё раз", () => load());
     }
   }
 
+  let lastState = null;
   function show(state) {
+    lastState = state;
+    showBack(false);
     const name = state.name ? `, ${esc(state.name)}` : "";
     ({ active: showActive, pending: showPending, no_username: showNoUsername }[state.status] || showNone)(state, name);
   }
@@ -455,7 +474,11 @@
             <p class="section-note" style="text-align:center;margin:0">Отсканируй в приложении: «+» → «QR-код»</p>
           </div>
         </details>
-      </div>`);
+      </div>
+
+      <div class="section"><div class="card">${reportRow()}</div>
+        <div class="section-note">Не грузится сайт, не подключается или тормозит — расскажи, разберёмся.</div></div>`);
+    bindReportRow();
 
     const copy = async () => {
       try {
@@ -658,6 +681,131 @@
     svg.addEventListener("pointermove", move);
     svg.addEventListener("pointerdown", move);
     svg.addEventListener("pointerleave", hide);
+  }
+
+  // ---------- Complaints ----------
+  const CATEGORIES = [
+    ["no_connection", "Не подключается", "VPN не включается или нет интернета"],
+    ["slow", "Медленно работает", "Всё грузится, но долго"],
+    ["site", "Не открывается сайт", "Конкретный сайт или приложение"],
+    ["other", "Другое", ""],
+  ];
+
+  function reportRow() {
+    return `<button class="row" id="report-row"><div class="row-icon danger">${ICON.alert}</div>
+      <div class="row-body"><div class="row-title">Сообщить о проблеме</div></div><div class="row-action">›</div></button>`;
+  }
+  function bindReportRow() {
+    const el = document.getElementById("report-row");
+    if (el) el.onclick = () => { haptic("tap"); showReport(); };
+  }
+
+  // Telegram's native back arrow when available; an in-page link otherwise.
+  const onBack = () => { haptic("tap"); lastState ? show(lastState) : load(); };
+  function showBack(visible) {
+    const back = wa() && wa().BackButton;
+    if (!back) return;
+    back.offClick(onBack);
+    if (visible) { back.onClick(onBack); back.show(); } else back.hide();
+  }
+
+  async function measureRtt() {
+    let best = null;
+    for (let i = 0; i < 3; i++) {
+      const t = performance.now();
+      try { await fetch(`/api/ping?t=${Date.now()}`, { cache: "no-store" }); } catch (_) { continue; }
+      const ms = performance.now() - t;
+      best = best == null ? ms : Math.min(best, ms);
+    }
+    return best;
+  }
+
+  function showReport() {
+    const form = { category: null, profile: "основной", network: null, site: "", comment: "" };
+    let rtt = null;
+    const segmented = (id, options, value) => `<div class="segmented in-form" role="group" id="${id}">
+      ${options.map(([v, label]) => `<button data-v="${esc(v)}" aria-pressed="${v === value}">${label}</button>`).join("")}</div>`;
+
+    render(`
+      ${wa() ? "" : `<button class="back" id="back">‹ Назад</button>`}
+      <div class="hero" style="padding-top:8px"><h1>Что случилось?</h1>
+        <p>Жалоба придёт админу, а ответ — в чат с ботом.</p></div>
+
+      <div class="section"><div class="card" id="categories">
+        ${CATEGORIES.map(([code, title, sub]) => `<div class="row choice" role="radio" aria-checked="false" data-c="${code}">
+          <div class="row-body"><div class="row-title">${title}</div>${sub ? `<div class="row-sub">${sub}</div>` : ""}</div>
+          <span class="check">✓</span></div>`).join("")}
+      </div></div>
+
+      <div class="section hidden" id="site-section"><div class="card">
+        <input class="field" id="site" maxlength="200" placeholder="Какой сайт или приложение? Например, youtube.com" autocomplete="off">
+      </div></div>
+
+      <div class="section">
+        <div class="form-group"><div class="form-label">Профиль в приложении</div>
+          ${segmented("profile", [["основной", "🇳🇱 Основной"], ["белые списки", "🇷🇺 Белые списки"], ["не знаю", "Не знаю"]], form.profile)}</div>
+        <div class="form-group"><div class="form-label">Интернет</div>
+          ${segmented("network", [["мобильный", "Мобильный"], ["Wi-Fi", "Wi-Fi"]], form.network)}</div>
+      </div>
+
+      <div class="section"><div class="card">
+        <textarea class="field" id="comment" maxlength="1000" placeholder="Подробности, если хочешь: что делал, когда началось"></textarea>
+      </div></div>
+
+      <div class="section">
+        <div class="section-title">Добавим автоматически</div>
+        <div class="card" id="auto">
+          ${row("📍", "Оператор и регион", "определяем…", "flag")}
+          ${row("📶", "Пинг до входа VPN", "замеряем…", "flag")}
+        </div>
+        <div class="section-note">Точный адрес и IP не сохраняем — только оператора и город.</div>
+      </div>`);
+
+    showBack(true);
+    const back = document.getElementById("back");
+    if (back) back.onclick = onBack;
+
+    app.querySelectorAll("#categories .row").forEach((el) => el.onclick = () => {
+      form.category = el.dataset.c;
+      app.querySelectorAll("#categories .row").forEach((r) => r.setAttribute("aria-checked", String(r === el)));
+      document.getElementById("site-section").classList.toggle("hidden", form.category !== "site");
+      if (form.category === "site") document.getElementById("site").focus();
+      haptic("tap");
+    });
+    for (const id of ["profile", "network"]) {
+      document.getElementById(id).onclick = (e) => {
+        const btn = e.target.closest("button[data-v]");
+        if (!btn) return;
+        form[id] = btn.dataset.v;
+        document.querySelectorAll(`#${id} button`).forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+        haptic("tap");
+      };
+    }
+
+    const autoRows = app.querySelectorAll("#auto .row-sub");
+    api("/api/context").then((ctx) => { autoRows[0].textContent = ctx.summary || "не удалось определить"; })
+      .catch(() => { autoRows[0].textContent = "не удалось определить"; });
+    measureRtt().then((ms) => { rtt = ms; autoRows[1].textContent = ms == null ? "не удалось замерить" : `${Math.round(ms)} мс`; });
+
+    setPrimary("Отправить", async () => {
+      if (!form.category) { toast("Выбери, что случилось"); haptic("error"); return; }
+      form.site = document.getElementById("site").value;
+      form.comment = document.getElementById("comment").value;
+      if (form.category === "site" && !form.site.trim()) { toast("Напиши, какой сайт не открывается"); haptic("error"); return; }
+      try {
+        const res = await api("/api/complaint", {
+          category: form.category, profile: form.profile, network: form.network,
+          site: form.site, comment: form.comment, platform: platform(), client_rtt_ms: rtt,
+        });
+        haptic("success");
+        showBack(false);
+        render(`${hero("check", "ok", "Жалоба отправлена", `Номер #${esc(res.id)}. Админ посмотрит и ответит в чат с ботом.`)}`);
+        setPrimary("Готово", () => (lastState ? show(lastState) : load()));
+      } catch (err) {
+        haptic("error");
+        toast(err.message);
+      }
+    });
   }
 
   function row(icon, title, sub, cls = "") {

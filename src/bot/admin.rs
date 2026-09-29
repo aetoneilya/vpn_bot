@@ -23,7 +23,37 @@ pub async fn handle(bot: &Bot, msg: &Message, cmd: AdminCommand, state: &AppStat
         AdminCommand::Delete(login) => delete(bot, chat, &login, state).await,
         AdminCommand::Broadcast(text) => broadcast(bot, chat, &text, state).await,
         AdminCommand::Msg(payload) => direct_message(bot, chat, &payload, state).await,
+        AdminCommand::Complaints => complaints(bot, chat, state).await,
+        AdminCommand::Reply(payload) => {
+            let (id, text) = payload
+                .trim()
+                .split_once(char::is_whitespace)
+                .and_then(|(id, text)| Some((parse_complaint_id(id).ok()?, text.trim())))
+                .filter(|(_, text)| !text.is_empty())
+                .ok_or_else(|| anyhow!("формат: /reply <номер жалобы> <текст>"))?;
+            reply_to_complaint(bot, chat, id, text, state).await
+        }
+        AdminCommand::Cancel => {
+            let text = match state.take_reply(msg.from.as_ref().map_or(0, |u| u.id.0)) {
+                Some(id) => format!("Ответ на жалобу #{id} отменён."),
+                None => "Нечего отменять.".into(),
+            };
+            bot.send_message(chat, text).await?;
+            Ok(())
+        }
     }
+}
+
+/// A plain (non-command) message from an approver: the reply they started with «Ответить».
+pub async fn handle_text(bot: &Bot, msg: &Message, state: &AppState) -> Result<bool> {
+    let (Some(user), Some(text)) = (msg.from.as_ref(), msg.text()) else {
+        return Ok(false);
+    };
+    let Some(id) = state.take_reply(user.id.0) else {
+        return Ok(false);
+    };
+    reply_to_complaint(bot, msg.chat.id, id, text, state).await?;
+    Ok(true)
 }
 
 pub async fn handle_action(
@@ -43,9 +73,85 @@ pub async fn handle_action(
             bot.send_message(ChatId(user_chat), ui::MEME_DISLIKE)
                 .await?;
         }
+        Action::ComplaintReply(id) => {
+            // Keep the buttons: the approver may still resolve the complaint afterwards.
+            state.start_reply(query.from.id.0, id);
+            bot.send_message(
+                chat,
+                format!("Напиши ответ на жалобу #{id} следующим сообщением. /cancel — отменить."),
+            )
+            .await?;
+            return Ok(());
+        }
+        Action::ComplaintResolve(id) => resolve_complaint(bot, chat, id, state).await?,
         Action::Guide | Action::Resend => unreachable!("user actions are routed elsewhere"),
     }
     clear_buttons(bot, query).await
+}
+
+async fn complaints(bot: &Bot, chat: ChatId, state: &AppState) -> Result<()> {
+    let open = state.store.open_complaints()?;
+    if open.is_empty() {
+        bot.send_message(chat, "Открытых жалоб нет 🎉").await?;
+        return Ok(());
+    }
+    for complaint in open {
+        bot.send_message(chat, crate::complaints::admin_card(&complaint))
+            .reply_markup(ui::complaint_keyboard(complaint.id))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn reply_to_complaint(
+    bot: &Bot,
+    chat: ChatId,
+    id: u64,
+    text: &str,
+    state: &AppState,
+) -> Result<()> {
+    let complaint = state
+        .store
+        .complaint(id)?
+        .ok_or_else(|| anyhow!("жалоба #{id} не найдена"))?;
+    bot.send_message(
+        complaint.details.chat_id,
+        format!("💬 Ответ по твоей жалобе #{id}:\n\n{text}"),
+    )
+    .await?;
+    bot.send_message(
+        chat,
+        format!(
+            "Ответ на жалобу #{id} отправлен. Закрыть её — кнопка «✅ Решено» или /complaints."
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn resolve_complaint(bot: &Bot, chat: ChatId, id: u64, state: &AppState) -> Result<()> {
+    if !state.store.resolve_complaint(id)? {
+        bot.send_message(chat, format!("Жалоба #{id} уже закрыта или не найдена."))
+            .await?;
+        return Ok(());
+    }
+    if let Some(complaint) = state.store.complaint(id)? {
+        bot.send_message(
+            complaint.details.chat_id,
+            format!("✅ Жалоба #{id} закрыта. Если проблема вернётся — сообщи снова через кнопку «VPN» или /problem."),
+        )
+        .await?;
+    }
+    bot.send_message(chat, format!("Жалоба #{id} закрыта."))
+        .await?;
+    Ok(())
+}
+
+fn parse_complaint_id(raw: &str) -> Result<u64> {
+    raw.trim()
+        .trim_start_matches('#')
+        .parse()
+        .map_err(|_| anyhow!("укажи номер жалобы"))
 }
 
 async fn approve(bot: &Bot, chat: ChatId, id: u64, state: &AppState) -> Result<()> {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
 
 use crate::access::{self, AccessStatus, RequestOutcome};
+use crate::complaints::{self, Category, NewComplaint, SubmitOutcome};
+use crate::geo::GeoInfo;
 use crate::latency;
 use crate::panel::Client;
 use crate::qr::render_qr_png;
@@ -38,6 +40,9 @@ pub async fn serve(app: Arc<AppState>, bot: Bot) -> Result<()> {
         .route("/api/state", post(get_state))
         .route("/api/request", post(request_access))
         .route("/api/status", post(get_status))
+        .route("/api/context", post(get_context))
+        .route("/api/complaint", post(post_complaint))
+        .route("/api/ping", get(ping))
         .route("/open-in-app", get(open_in_app))
         .with_state(WebState { app, bot });
 
@@ -225,6 +230,108 @@ struct StatusResponse {
 }
 
 /// VPN health and relay ↔ exit latency history; available to any allowed user.
+/// Location of the requester, from the real client IP the TLS proxy puts in `X-Real-IP`.
+/// Trusted because the server only listens on localhost behind that proxy.
+fn client_geo(app: &AppState, headers: &HeaderMap) -> GeoInfo {
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse().ok());
+    match (app.geo.as_ref(), ip) {
+        (Some(db), Some(ip)) => db.lookup(ip),
+        _ => GeoInfo::default(),
+    }
+}
+
+/// Cheap endpoint the page times to measure the device → relay round trip.
+async fn ping() -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        StatusCode::NO_CONTENT,
+    )
+}
+
+#[derive(Serialize)]
+struct ContextResponse {
+    geo: GeoInfo,
+    summary: Option<String>,
+}
+
+/// What will be attached to a complaint, shown in the form before sending.
+async fn get_context(
+    State(web): State<WebState>,
+    headers: HeaderMap,
+    Json(req): Json<AuthRequest>,
+) -> Response {
+    if let Err(rejection) = authenticate(&web, &req.init_data) {
+        return rejection.into_response();
+    }
+    let geo = client_geo(&web.app, &headers);
+    let known = geo.asn.is_some() || geo.country.is_some();
+    Json(ContextResponse {
+        summary: known.then(|| geo.summary()),
+        geo,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct ComplaintRequest {
+    init_data: String,
+    category: String,
+    profile: Option<String>,
+    network: Option<String>,
+    site: Option<String>,
+    comment: Option<String>,
+    platform: Option<String>,
+    client_rtt_ms: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct ComplaintResponse {
+    id: u64,
+}
+
+async fn post_complaint(
+    State(web): State<WebState>,
+    headers: HeaderMap,
+    Json(req): Json<ComplaintRequest>,
+) -> Response {
+    let user = match authenticate(&web, &req.init_data) {
+        Ok(user) => user,
+        Err(rejection) => return rejection.into_response(),
+    };
+    let short = |v: Option<String>| v.map(|s| s.chars().take(64).collect::<String>());
+    let complaint = NewComplaint {
+        user_id: user.id,
+        // Mini Apps are opened from the bot chat, so the private chat id equals the user id.
+        chat_id: ChatId(user.id as i64),
+        login: user.username.as_deref().map(crate::panel::normalize_login),
+        category: Category::from_code(&req.category),
+        profile: short(req.profile),
+        network: short(req.network),
+        site: req.site,
+        comment: req.comment,
+        platform: short(req.platform),
+        client_rtt_ms: req.client_rtt_ms.filter(|v| v.is_finite() && *v >= 0.0),
+        geo: client_geo(&web.app, &headers),
+    };
+    match complaints::submit(&web.bot, &web.app, complaint).await {
+        Ok(SubmitOutcome::Submitted(id)) => Json(ComplaintResponse { id }).into_response(),
+        Ok(SubmitOutcome::RateLimited) => error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Слишком много жалоб за час — попробуй позже.",
+        ),
+        Err(err) => {
+            log::error!("complaint submit failed: {err:#}");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Не получилось отправить. Попробуй позже или напиши /problem в боте.",
+            )
+        }
+    }
+}
+
 async fn get_status(State(web): State<WebState>, Json(req): Json<StatusRequest>) -> Response {
     if let Err(rejection) = authenticate(&web, &req.init_data) {
         return rejection.into_response();

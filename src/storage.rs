@@ -1,4 +1,4 @@
-//! Pending access requests, persisted in SQLite so they survive restarts.
+//! SQLite persistence: pending access requests, latency samples and user complaints.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -48,6 +48,30 @@ impl Store {
                 rtt_ms REAL
             );
             CREATE INDEX IF NOT EXISTS idx_latency_samples_ts ON latency_samples (ts);
+
+            -- User-reported problems. Location is stored as operator/region only, never the raw IP.
+            CREATE TABLE IF NOT EXISTS complaints (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    INTEGER NOT NULL,
+                user_id       INTEGER NOT NULL,
+                chat_id       INTEGER NOT NULL,
+                login         TEXT,
+                category      TEXT NOT NULL,
+                profile       TEXT,
+                network       TEXT,
+                site          TEXT,
+                comment       TEXT,
+                platform      TEXT,
+                client_rtt_ms REAL,
+                country       TEXT,
+                region        TEXT,
+                city          TEXT,
+                asn           INTEGER,
+                operator      TEXT,
+                status        TEXT NOT NULL DEFAULT 'open',
+                resolved_at   INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_complaints_user ON complaints (user_id, created_at);
             "#,
         )
         .context("failed to initialize sqlite schema")?;
@@ -156,6 +180,84 @@ impl Store {
         Ok(())
     }
 
+    pub fn insert_complaint(&self, c: &crate::complaints::NewComplaint) -> Result<u64> {
+        let conn = self.conn()?;
+        conn.execute(
+            r#"INSERT INTO complaints (created_at, user_id, chat_id, login, category, profile, network,
+                   site, comment, platform, client_rtt_ms, country, region, city, asn, operator)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"#,
+            params![
+                chrono::Utc::now().timestamp(),
+                c.user_id as i64,
+                c.chat_id.0,
+                c.login,
+                c.category.code(),
+                c.profile,
+                c.network,
+                c.site,
+                c.comment,
+                c.platform,
+                c.client_rtt_ms,
+                c.geo.country,
+                c.geo.region,
+                c.geo.city,
+                c.geo.asn,
+                c.geo.operator,
+            ],
+        )
+        .context("failed to insert complaint")?;
+        Ok(conn.last_insert_rowid() as u64)
+    }
+
+    pub fn complaints_since(&self, user_id: u64, since: i64) -> Result<u64> {
+        let count: i64 = self
+            .conn()?
+            .query_row(
+                "SELECT COUNT(*) FROM complaints WHERE user_id = ?1 AND created_at >= ?2",
+                params![user_id as i64, since],
+                |r| r.get(0),
+            )
+            .context("failed to count complaints")?;
+        Ok(count as u64)
+    }
+
+    pub fn complaint(&self, id: u64) -> Result<Option<crate::complaints::Complaint>> {
+        self.conn()?
+            .query_row(
+                &format!("{COMPLAINT_SELECT} WHERE id = ?1"),
+                params![id as i64],
+                read_complaint,
+            )
+            .optional()
+            .context("failed to query complaint")
+    }
+
+    pub fn open_complaints(&self) -> Result<Vec<crate::complaints::Complaint>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "{COMPLAINT_SELECT} WHERE status = 'open' ORDER BY id"
+            ))
+            .context("failed to prepare complaints listing")?;
+        let rows = stmt
+            .query_map([], read_complaint)
+            .context("failed to list complaints")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to read complaint row")
+    }
+
+    /// Marks a complaint resolved; returns false if it was not open.
+    pub fn resolve_complaint(&self, id: u64) -> Result<bool> {
+        let changed = self
+            .conn()?
+            .execute(
+                "UPDATE complaints SET status = 'resolved', resolved_at = ?2 WHERE id = ?1 AND status = 'open'",
+                params![id as i64, chrono::Utc::now().timestamp()],
+            )
+            .context("failed to resolve complaint")?;
+        Ok(changed > 0)
+    }
+
     fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
         self.conn
             .lock()
@@ -170,5 +272,35 @@ fn read_request(row: &Row<'_>) -> rusqlite::Result<PendingRequest> {
         user_id: row.get::<_, i64>(2)? as u64,
         login: row.get(3)?,
         created_at_unix: row.get(4)?,
+    })
+}
+
+const COMPLAINT_SELECT: &str = "SELECT id, created_at, user_id, chat_id, login, category, profile, network, site, comment, platform, client_rtt_ms, country, region, city, asn, operator FROM complaints";
+
+fn read_complaint(row: &Row<'_>) -> rusqlite::Result<crate::complaints::Complaint> {
+    use crate::complaints::{Category, Complaint, NewComplaint};
+    use crate::geo::GeoInfo;
+    Ok(Complaint {
+        id: row.get::<_, i64>(0)? as u64,
+        created_at: row.get(1)?,
+        details: NewComplaint {
+            user_id: row.get::<_, i64>(2)? as u64,
+            chat_id: ChatId(row.get(3)?),
+            login: row.get(4)?,
+            category: Category::from_code(&row.get::<_, String>(5)?),
+            profile: row.get(6)?,
+            network: row.get(7)?,
+            site: row.get(8)?,
+            comment: row.get(9)?,
+            platform: row.get(10)?,
+            client_rtt_ms: row.get(11)?,
+            geo: GeoInfo {
+                country: row.get(12)?,
+                region: row.get(13)?,
+                city: row.get(14)?,
+                asn: row.get(15)?,
+                operator: row.get(16)?,
+            },
+        },
     })
 }
